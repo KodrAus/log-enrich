@@ -12,6 +12,7 @@ extern crate log;
 use std::sync::Arc;
 use std::ops::Drop;
 use std::mem;
+use std::iter::Extend;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::{Iter, Entry};
@@ -83,7 +84,37 @@ impl Properties {
         }
     }
 
+    fn contains(&self, key: &'static str) -> bool {
+        match *self {
+            Properties::Single(k, _) if k == key => true,
+            Properties::Map(ref m) => m.contains_key(key),
+            _ => false
+        }
+    }
+
     fn iter(&self) -> PropertiesIter {
+        self.into_iter()
+    }
+}
+
+impl<'a> Extend<(&'static str, &'a Value)> for Properties {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = (&'static str, &'a Value)>
+    {
+        for (k, v) in iter {
+            if !self.contains(k) {
+                self.insert(k, v.to_owned());
+            }
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Properties {
+    type IntoIter = PropertiesIter<'a>;
+    type Item = (&'static str, &'a Value);
+
+    fn into_iter(self) -> Self::IntoIter {
         match *self {
             Properties::Empty => PropertiesIter::Empty,
             Properties::Single(ref k, ref v) => PropertiesIter::Single(k, v),
@@ -133,18 +164,14 @@ pub fn logger() -> Builder {
 impl<'a, 'b> Serialize for Log<'a, 'b> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer
+        S: Serializer,
     {
         #[derive(Serialize)]
         struct SerializeLog<'a> {
             #[serde(serialize_with = "serialize_msg")]
             msg: &'a Record<'a>,
-            #[serde(serialize_with = "serialize_ctxt", skip_serializing_if = "skip_serialize_ctxt")]
+            #[serde(serialize_with = "serialize_ctxt")]
             ctxt: (),
-        }
-
-        fn skip_serialize_ctxt(_: &()) -> bool {
-            LOCAL_CTXT.with(|shared| shared.borrow().is_none())
         }
 
         fn serialize_ctxt<S>(_: &(), serializer: S) -> Result<S::Ok, S::Error>
@@ -152,14 +179,16 @@ impl<'a, 'b> Serialize for Log<'a, 'b> {
             S: Serializer,
         {
             LOCAL_CTXT.with(|shared| {
-                let mut seen = HashMap::new();
-                let mut map = serializer.serialize_map(None)?;
+                let shared = shared.borrow();
 
-                if let Some(ref ctxt) = *shared.borrow() {
-                    ctxt.serialize(&mut map, &mut seen)?;
+                if let Some(ref ctxt) = *shared {
+                    let mut map = serializer.serialize_map(None)?;
+                    ctxt.serialize(&mut map)?;
+                    map.end()
                 }
-
-                map.end()
+                else {
+                    serializer.serialize_none()
+                }
             })
         }
 
@@ -187,23 +216,32 @@ impl SharedCtxt {
         }
     }
 
-    fn serialize<S>(&self, serializer: &mut S, seen: &mut HashMap<&'static str, ()>) -> Result<(), S::Error>
+    fn is_joined(&self) -> bool {
+        match *self {
+            SharedCtxt::Local(_) => false,
+            _ => true
+        }
+    }
+
+    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
     where
         S: SerializeMap,
     {
         match *self {
-            SharedCtxt::Local(ref local) => local.serialize(serializer, seen)?,
+            SharedCtxt::Local(ref local) => local.serialize(serializer, |_| true)?,
             SharedCtxt::Joined(ref shared, ref local) => {
-                shared.serialize(serializer, seen)?;
-                local.serialize(serializer, seen)?;
+                local.serialize(serializer, |_| true)?;
+                shared.serialize(serializer, |kv| !local.properties.contains(kv.0))?;
             }
         }
 
         Ok(())
     }
 
+    // TODO: This is actually problematic
+    // Just because the immediate parent is the same context doesn't mean its parent is
     fn push(shared: &mut Option<SharedCtxt>, ctxt: Arc<LocalCtxt>) {
-        if let Some(shared_ctxt) = mem::replace(shared, None) {
+        if let Some(shared_ctxt) = shared.take() {
             // Move out of the current shared context, just to avoid a clone
             let shared_ctxt = match shared_ctxt {
                 SharedCtxt::Local(local) => local,
@@ -215,8 +253,12 @@ impl SharedCtxt {
             // - If they're not the same, it means `ctxt` has been moved somewhere (a different thread)
             //   We can't just replace the `shared` context without losing information, so we join them together
             match ctxt.parent.as_ref().map(|parent| parent.current()) {
-                Some(ctxt_parent) if Arc::ptr_eq(&shared_ctxt, ctxt_parent) => *shared = Some(SharedCtxt::Local(ctxt)),
-                _ => *shared = Some(SharedCtxt::Joined(shared_ctxt, ctxt))
+                Some(ctxt_parent) if Arc::ptr_eq(&shared_ctxt, ctxt_parent) => {
+                    *shared = Some(SharedCtxt::Local(ctxt))
+                },
+                _ => {
+                    *shared = Some(SharedCtxt::Joined(shared_ctxt, ctxt))
+                }
             }
         }
         else {
@@ -240,19 +282,21 @@ impl SharedCtxt {
 }
 
 impl LocalCtxt {
-    fn serialize<S>(&self, serializer: &mut S, seen: &mut HashMap<&'static str, ()>) -> Result<(), S::Error>
+    fn serialize<S, F>(&self, serializer: &mut S, filter: F) -> Result<(), S::Error>
     where
         S: SerializeMap,
+        F: Fn(&(&'static str, &Value)) -> bool,
     {
-        for (k, v) in self.properties.iter() {
-            if let Entry::Vacant(entry) = seen.entry(k) {
-                serializer.serialize_entry(k, v)?;
-                entry.insert(());
-            }
+        for (k, v) in self.properties.iter().filter(&filter) {
+            serializer.serialize_entry(k, v)?;
         }
 
-        if let Some(ref parent) = self.parent {
-            parent.serialize(serializer, seen)?;
+        // We only need to serialize the parent context if it's not the one we joined to
+        match self.parent {
+            Some(ref parent) if parent.is_joined() => {
+                parent.serialize(serializer)?;
+            },
+            _ => ()
         }
 
         Ok(())
@@ -315,6 +359,11 @@ impl Logger {
     fn log_value<'a, 'b>(&'b self, record: Record<'a>) -> Value {
         serde_json::to_value(&self.log(record)).unwrap()
     }
+
+    #[cfg(test)]
+    fn log_string<'a, 'b>(&'b self, record: Record<'a>) -> String {
+        serde_json::to_string(&self.log(record)).unwrap()
+    }
 }
 
 impl Builder {
@@ -322,14 +371,20 @@ impl Builder {
         // Capture the current context
         // Each logger keeps a copy of the context it was created in so it can be shared
         // This context is set by other loggers calling `.scope()`
-        // TODO: Should we just collect properties here from the context?
-        //       Then we could avoid walking the context for every record logged
-        //       Would we then need to worry about parents at all?
         let ctxt = if let Some(ctxt) = self.ctxt {
             LOCAL_CTXT.with(|shared| {
+                let shared = shared.borrow();
+                let mut properties = ctxt.properties;
+                
+                properties
+                    .extend(shared
+                        .as_ref()
+                        .map(|shared| &shared.current().properties)
+                        .unwrap_or(&Properties::Empty));
+
                 Some(Arc::new(LocalCtxt {
-                    parent: shared.borrow().to_owned(),
-                    properties: ctxt.properties,
+                    parent: shared.to_owned(),
+                    properties,
                 }))
             })
         }
@@ -504,23 +559,30 @@ mod tests {
     fn enriched_multiple_threads() {
         let f = logger()
             .enrich("correlation", "An Id")
+            .enrich("operation ", "Logging")
             .enrich("service", "Banana")
-            .scope_fn(|| {
-                let log = logger().get().log_value(record!());
+            .scope(
+                logger()
+                    .enrich("correlation", "Another Id")
+                    .scope_fn(|| {
+                        LOCAL_CTXT.with(|shared| println!("{:?}", *shared.borrow()));
+                        
+                        let log = logger().get().log_value(record!());
 
-                let expected = json!({
-                    "msg": "Hi user!",
-                    "ctxt": {
-                        "correlation": "An Id",
-                        "context": "bg-thread",
-                        "service": "Mandarin"
-                    }
-                });
+                        let expected = json!({
+                            "msg": "Hi user!",
+                            "ctxt": {
+                                "correlation": "Another Id",
+                                "context": "bg-thread",
+                                "operation": "Logging",
+                                "service": "Banana"
+                            }
+                        });
 
-                assert_eq!(expected, log);
+                        assert_eq!(expected, log);
 
-                Ok(())
-            });
+                        Ok(())
+                    }));
 
         thread::spawn(move || {
             let _: Result<_, ()> = logger()
