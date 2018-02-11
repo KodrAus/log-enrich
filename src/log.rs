@@ -17,7 +17,7 @@ pub fn format() -> impl Fn(&mut Formatter, &Record) -> io::Result<()> {
                 record.args()
             )?;
 
-            if let Some(ctxt) = scope.ctxt {
+            if let Some(ctxt) = scope.current() {
                 let mut value_style = buf.style();
 
                 value_style.set_bold(true);
@@ -72,7 +72,7 @@ impl<'a, 'b> Serialize for Log<'a, 'b> {
         where
             S: Serializer,
         {
-            if let Some(ref ctxt) = scope.ctxt {
+            if let Some(ref ctxt) = scope.current() {
                 let properties = ctxt.properties();
 
                 let mut map = serializer.serialize_map(Some(properties.len()))?;

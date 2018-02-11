@@ -17,25 +17,22 @@ extern crate serde_derive;
 #[cfg_attr(test, macro_use)]
 extern crate serde_json;
 extern crate take_mut;
+extern crate backtrace;
 
 mod ctxt;
 mod log;
 mod properties;
 
 use std::sync::Arc;
-use std::ops::Drop;
-use std::cell::RefCell;
 
 use futures::{Future, IntoFuture, Lazy, Poll};
 use futures::future::lazy;
 
-use self::ctxt::{Ctxt, LocalCtxt, SharedCtxt};
+use self::ctxt::{Ctxt, LocalCtxt, SharedCtxt, Scope};
 use self::properties::Properties;
 
 pub use serde_json::Value;
 pub use self::log::Log;
-
-thread_local!(static SHARED_CTXT: RefCell<Option<SharedCtxt>> = RefCell::new(Default::default()));
 
 pub fn init() {
     env_logger::Builder::from_env(env_logger::Env::default())
@@ -64,11 +61,6 @@ pub struct LogFuture<TFuture> {
     inner: TFuture,
 }
 
-#[derive(Clone, Copy)]
-struct Scope<'a> {
-    ctxt: Option<&'a Ctxt>,
-}
-
 impl Builder {
     /// Create a `Logger` with the built context.
     ///
@@ -78,12 +70,10 @@ impl Builder {
         // Each logger keeps a copy of the context it was created in so it can be shared
         // This context is set by other loggers calling `.scope()`
         let ctxt = if let Some(ctxt) = self.ctxt {
-            SHARED_CTXT.with(|shared| {
-                let shared = shared.borrow();
-
-                Some(Arc::new(Ctxt::from_shared(
+            SharedCtxt::scope_current(|scope| {
+                Some(Arc::new(Ctxt::from_scope(
                     ctxt.properties,
-                    shared.as_ref(),
+                    &scope,
                 )))
             })
         } else {
@@ -91,7 +81,7 @@ impl Builder {
         };
 
         Logger {
-            ctxt: ctxt.map(|local| LocalCtxt::Local { local }),
+            ctxt: ctxt.map(|local| LocalCtxt::new(local)),
         }
     }
 
@@ -180,43 +170,7 @@ impl Logger {
         // Set the current shared log context
         // This makes the context available to other loggers on this thread
         // within the `scope` function
-        SHARED_CTXT.with(|shared| {
-            struct SharedGuard<'a> {
-                shared: Option<&'a RefCell<Option<SharedCtxt>>>,
-                logger: Option<&'a LocalCtxt>,
-            }
-
-            impl<'a> Drop for SharedGuard<'a> {
-                fn drop(&mut self) {
-                    if let Some(shared) = self.shared.take() {
-                        SharedCtxt::pop(&mut shared.borrow_mut(), self.logger);
-                    }
-                }
-            }
-
-            let guard = {
-                SharedCtxt::push(&mut shared.borrow_mut(), self.ctxt.as_mut());
-                SharedGuard {
-                    shared: Some(&shared),
-                    logger: self.ctxt.as_ref(),
-                }
-            };
-
-            let current = {
-                shared
-                    .borrow()
-                    .as_ref()
-                    .map(|shared| shared.current().clone())
-            };
-
-            let ret = f(Scope {
-                ctxt: current.as_ref().map(|current| current.as_ref()),
-            });
-
-            drop(guard);
-
-            ret
-        })
+        SharedCtxt::scope(self.ctxt.as_mut(), f)
     }
 }
 
@@ -285,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn enriched() {
+    fn enriched_basic() {
         let _: Result<_, ()> = logger()
             .enrich("correlation", "An Id")
             .enrich("service", "Banana")

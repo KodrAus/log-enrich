@@ -1,7 +1,11 @@
+use std::mem;
 use std::sync::Arc;
+use std::cell::RefCell;
 use take_mut;
 
 use properties::Properties;
+
+thread_local!(static SHARED_CTXT: RefCell<SharedCtxt> = RefCell::new(Default::default()));
 
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Ctxt {
@@ -10,7 +14,18 @@ pub(crate) struct Ctxt {
 }
 
 #[derive(Debug)]
-pub(crate) enum LocalCtxt {
+pub(crate) struct LocalCtxt {
+    inner: LocalCtxtInner,
+}
+
+#[derive(Debug)]
+enum LocalCtxtInner {
+    Owned(LocalCtxtKind),
+    Swapped(LocalCtxtKind),
+}
+
+#[derive(Debug)]
+enum LocalCtxtKind {
     Local {
         local: Arc<Ctxt>,
     },
@@ -18,18 +33,77 @@ pub(crate) enum LocalCtxt {
         original: Arc<Ctxt>,
         joined: Arc<Ctxt>,
     },
+    __Uninitialized,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct SharedCtxt {
-    inner: Arc<Ctxt>,
+    inner: LocalCtxtKind,
+}
+
+impl Default for SharedCtxt {
+    fn default() -> Self {
+        SharedCtxt {
+            inner: LocalCtxtKind::__Uninitialized
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Scope<'a> {
+    ctxt: Option<&'a Arc<Ctxt>>,
+}
+
+impl<'a> Scope<'a> {
+    pub(crate) fn current(&self) -> Option<&Ctxt> {
+        self.ctxt.as_ref().map(|ctxt| ctxt.as_ref())
+    }
 }
 
 impl LocalCtxt {
+    pub(crate) fn new(ctxt: Arc<Ctxt>) -> Self {
+        LocalCtxt {
+            inner: LocalCtxtInner::Owned(LocalCtxtKind::Local { local: ctxt })
+        }
+    }
+
+    fn swap(&mut self) {
+        take_mut::take(&mut self.inner, |local| {
+            match local {
+                LocalCtxtInner::Owned(kind) => LocalCtxtInner::Swapped(kind),
+                LocalCtxtInner::Swapped(kind) => LocalCtxtInner::Owned(kind),
+            }
+        })
+    }
+
+    fn clear_joined(&mut self) {
+        self.kind_mut().clear_joined()
+    }
+
+    fn set_joined(&mut self, joined: Arc<Ctxt>) {
+        self.kind_mut().set_joined(joined)
+    }
+
+    fn kind(&self) -> &LocalCtxtKind {
+        match self.inner {
+            LocalCtxtInner::Owned(ref kind) => kind,
+            LocalCtxtInner::Swapped(_) => panic!("attempted to use swapped context"),
+        }
+    }
+
+    fn kind_mut(&mut self) -> &mut LocalCtxtKind {
+        match self.inner {
+            LocalCtxtInner::Owned(ref mut kind) => kind,
+            LocalCtxtInner::Swapped(_) => panic!("attempted to use swapped context"),
+        }
+    }
+}
+
+impl LocalCtxtKind {
     fn clear_joined(&mut self) {
         take_mut::take(self, |ctxt| {
-            if let LocalCtxt::Joined { original, .. } = ctxt {
-                LocalCtxt::Local { local: original }
+            if let LocalCtxtKind::Joined { original, .. } = ctxt {
+                LocalCtxtKind::Local { local: original }
             } else {
                 ctxt
             }
@@ -38,37 +112,124 @@ impl LocalCtxt {
 
     fn set_joined(&mut self, joined: Arc<Ctxt>) {
         take_mut::take(self, |ctxt| match ctxt {
-            LocalCtxt::Local { local } => LocalCtxt::Joined {
+            LocalCtxtKind::Local { local } => LocalCtxtKind::Joined {
                 original: local,
                 joined,
             },
-            LocalCtxt::Joined { original, .. } => LocalCtxt::Joined { original, joined },
+            LocalCtxtKind::Joined { original, .. } => LocalCtxtKind::Joined { original, joined },
+            LocalCtxtKind::__Uninitialized => panic!("attempted to use uninitialised context")
         });
     }
 
-    fn current(&self) -> &Arc<Ctxt> {
+    fn current(&self) -> Option<&Arc<Ctxt>> {
         match *self {
-            LocalCtxt::Local { ref local } => local,
-            LocalCtxt::Joined { ref joined, .. } => joined,
+            LocalCtxtKind::Local { ref local } => Some(local),
+            LocalCtxtKind::Joined { ref joined, .. } => Some(joined),
+            LocalCtxtKind::__Uninitialized => None
         }
     }
 }
 
 impl SharedCtxt {
-    pub(crate) fn current(&self) -> &Arc<Ctxt> {
-        &self.inner
+    fn current(&self) -> Option<&Arc<Ctxt>> {
+        self.inner.current()
     }
 
-    pub(crate) fn push(shared: &mut Option<SharedCtxt>, logger: Option<&mut LocalCtxt>) {
-        if let Some(incoming_ctxt) = logger {
+    pub(crate) fn scope_current<F, R>(f: F) -> R
+    where
+        F: FnOnce(Scope) -> R
+    {
+        SHARED_CTXT.with(|shared| {
+            let current = {
+                shared
+                    .borrow()
+                    .current()
+                    .cloned()
+            };
+
+            f(Scope {
+                ctxt: current.as_ref(),
+            })
+        })
+    }
+
+    pub(crate) fn scope<F, R>(local: Option<&mut LocalCtxt>, f: F) -> R
+    where
+        F: FnOnce(Scope) -> R
+    {
+        SHARED_CTXT.with(|shared| {
+            struct SharedGuard<'a> {
+                shared: Option<&'a RefCell<SharedCtxt>>,
+                local: Option<&'a mut LocalCtxt>,
+            }
+
+            impl<'a> SharedGuard<'a> {
+                fn new(shared: &'a RefCell<SharedCtxt>, mut local: Option<&'a mut LocalCtxt>) -> Self {
+                    SharedCtxt::push(&mut shared.borrow_mut(), &mut local);
+                    SharedGuard {
+                        shared: Some(&shared),
+                        local: local,
+                    }
+                }
+            }
+
+            impl<'a> Drop for SharedGuard<'a> {
+                fn drop(&mut self) {
+                    if let Some(shared) = self.shared.take() {
+                        SharedCtxt::pop(&mut shared.borrow_mut(), self.local.take());
+                    }
+                }
+            }
+
+            let guard = SharedGuard::new(&shared, local);
+
+            let current = {
+                shared
+                    .borrow()
+                    .current()
+                    .cloned()
+            };
+
+            let ret = f(Scope {
+                ctxt: current.as_ref(),
+            });
+
+            drop(guard);
+
+            ret
+        })
+    }
+
+    fn swap_into_self(&mut self, local: &mut LocalCtxt) {
+        match local.inner {
+            LocalCtxtInner::Owned(ref mut kind) => {
+                mem::swap(&mut self.inner, kind);
+                local.swap();
+            },
+            LocalCtxtInner::Swapped(_) => panic!("the local context has already been swapped")
+        }
+    }
+
+    fn swap_out_of_self(&mut self, local: &mut LocalCtxt) {
+        match local.inner {
+            LocalCtxtInner::Swapped(ref mut kind) => {
+                mem::swap(&mut self.inner, kind);
+                local.swap();
+            },
+            LocalCtxtInner::Owned(_) => panic!("the local context hasn't been swapped")
+        }
+    }
+
+    fn push(shared: &mut SharedCtxt, logger: &mut Option<&mut LocalCtxt>) {
+        if let Some(ref mut incoming_ctxt) = *logger {
             // Check whether there's already an active context
-            if let Some(ref mut shared_ctxt) = *shared {
+            if let Some(shared_ctxt) = shared.current() {
                 // If we have a joined context, check it first
                 // If the shared context is invalid, then we might recreate it
-                if let LocalCtxt::Joined { ref joined, .. } = *incoming_ctxt {
+                if let LocalCtxtKind::Joined { ref joined, .. } = *incoming_ctxt.kind() {
                     if let Some(ref parent) = joined.parent {
-                        if Arc::ptr_eq(&shared_ctxt.current(), parent) {
-                            shared_ctxt.inner = joined.clone();
+                        if Arc::ptr_eq(shared_ctxt, parent) {
+                            shared.swap_into_self(incoming_ctxt);
                             return;
                         }
                     }
@@ -77,10 +238,10 @@ impl SharedCtxt {
                 }
 
                 // Check the parent of the original context
-                if let LocalCtxt::Local { ref local, .. } = *incoming_ctxt {
+                if let LocalCtxtKind::Local { ref local, .. } = *incoming_ctxt.kind() {
                     if let Some(ref parent) = local.parent {
-                        if Arc::ptr_eq(&shared_ctxt.current(), parent) {
-                            shared_ctxt.inner = local.clone();
+                        if Arc::ptr_eq(shared_ctxt, parent) {
+                            shared.swap_into_self(incoming_ctxt);
                             return;
                         }
                     }
@@ -89,11 +250,11 @@ impl SharedCtxt {
                     // a new joined context that combines them.
                     let joined = Arc::new(Ctxt::from_shared(
                         local.properties.clone(),
-                        Some(&shared_ctxt),
+                        Some(shared_ctxt.clone()),
                     ));
                     incoming_ctxt.set_joined(joined);
 
-                    shared_ctxt.inner = incoming_ctxt.current().clone();
+                    shared.swap_into_self(incoming_ctxt);
                     return;
                 }
 
@@ -103,19 +264,20 @@ impl SharedCtxt {
                 // If this context is the root of this thread then there's no need for it
                 incoming_ctxt.clear_joined();
 
-                *shared = Some(SharedCtxt {
-                    inner: incoming_ctxt.current().clone(),
-                });
+                let mut root_ctxt = SharedCtxt {
+                    inner: LocalCtxtKind::__Uninitialized,
+                };
+
+                root_ctxt.swap_into_self(incoming_ctxt);
+
+                *shared = root_ctxt;
             }
         }
     }
 
-    pub(crate) fn pop(shared: &mut Option<SharedCtxt>, logger: Option<&LocalCtxt>) {
-        if logger.is_some() {
-            *shared = shared
-                .take()
-                .and_then(|shared| shared.current().parent.clone())
-                .map(|local| SharedCtxt { inner: local });
+    fn pop(shared: &mut SharedCtxt, mut logger: Option<&mut LocalCtxt>) {
+        if let Some(ref mut outgoing_ctxt) = logger {
+            shared.swap_out_of_self(outgoing_ctxt);
         }
     }
 }
@@ -125,18 +287,22 @@ impl Ctxt {
     ///
     /// If the shared context is `Some`, then the local context will contain the union
     /// of `properties` and the properties on the shared context.
-    pub(crate) fn from_shared(mut properties: Properties, shared: Option<&SharedCtxt>) -> Self {
+    fn from_shared(mut properties: Properties, shared: Option<Arc<Ctxt>>) -> Self {
         properties.extend(
             shared
                 .as_ref()
-                .map(|shared| &shared.current().properties)
+                .map(|shared| &shared.properties)
                 .unwrap_or(&Properties::Empty),
         );
 
         Ctxt {
-            parent: shared.as_ref().map(|shared| shared.current().clone()),
+            parent: shared,
             properties,
         }
+    }
+
+    pub(crate) fn from_scope(properties: Properties, scope: &Scope) -> Self {
+        Ctxt::from_shared(properties, scope.ctxt.cloned())
     }
 
     pub(crate) fn properties(&self) -> &Properties {
