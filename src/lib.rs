@@ -1,4 +1,11 @@
-#![feature(nll)]
+/*!
+Enriched logging.
+
+This crate allows you to enrich log records within a scope with a collection of properties.
+It's compatible with `log`.
+*/
+
+#![feature(nll, catch_expr)]
 #![cfg_attr(test, feature(test))]
 
 extern crate futures;
@@ -8,14 +15,16 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate log;
+extern crate env_logger;
 
 use std::sync::Arc;
 use std::ops::Drop;
 use std::mem;
 use std::iter::Extend;
+use std::io::Write;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::hash_map::{Iter, Entry};
+use std::collections::hash_map;
 
 use log::Record;
 use futures::{Future, IntoFuture, Poll, Lazy};
@@ -23,6 +32,47 @@ use futures::future::lazy;
 use serde::ser::{Serialize, Serializer, SerializeMap};
 
 pub use serde_json::Value;
+
+thread_local!(static SHARED_CTXT: RefCell<Option<SharedCtxt>> = RefCell::new(Default::default()));
+
+pub fn init() {
+    env_logger::Builder::from_env(env_logger::Env::default())
+        .format(|buf, record| {
+            logger().get().scope(|scope| {
+                do catch {
+                    write!(buf, "{}: {}: {}", record.level(), buf.timestamp(), record.args())?;
+
+                    if let Some(ctxt) = scope.ctxt {
+                        write!(buf, " (")?;
+
+                        let mut first = true;
+                        for (k, v) in &ctxt.properties {
+                            if first {
+                                first = false;
+                                write!(buf, "{}: {}", k, v)?;
+                            }
+                            else {
+                                write!(buf, ", {}: {}", k, v)?;
+                            }
+                        }
+
+                        write!(buf, ")")?;
+                    }
+
+                    writeln!(buf)?;
+
+                    Ok(())
+                }
+            })
+        })
+        .init();
+}
+
+pub fn logger() -> Builder {
+    Builder {
+        ctxt: None,
+    }
+}
 
 struct BuilderCtxt {
     properties: Properties,
@@ -38,7 +88,47 @@ enum Properties {
 enum PropertiesIter<'a> {
     Empty,
     Single(&'static str, &'a Value),
-    Map(Iter<'a, &'static str, Value>),
+    Map(hash_map::Iter<'a, &'static str, Value>),
+}
+
+pub struct Builder {
+    ctxt: Option<BuilderCtxt>,
+}
+
+pub struct Logger {
+    ctxt: LocalCtxt,
+}
+
+pub struct LogFuture<TFuture> {
+    logger: Logger,
+    inner: TFuture,
+}
+
+pub struct Log<'a, 'b> {
+    scope: Scope<'a>,
+    record: Record<'b>,
+}
+
+#[derive(Clone, Default, Debug)]
+struct Ctxt {
+    parent: Option<Arc<Ctxt>>,
+    properties: Properties,
+}
+
+#[derive(Clone, Default, Debug)]
+struct LocalCtxt {
+    original_ctxt: Option<Arc<Ctxt>>,
+    joined_ctxt: Option<Arc<Ctxt>>,
+}
+
+#[derive(Clone, Default, Debug)]
+struct SharedCtxt {
+    current: Arc<Ctxt>,
+}
+
+#[derive(Clone, Copy)]
+struct Scope<'a> {
+    ctxt: Option<&'a Ctxt>,
 }
 
 impl<'a> Iterator for PropertiesIter<'a> {
@@ -84,16 +174,24 @@ impl Properties {
         }
     }
 
-    fn contains(&self, key: &'static str) -> bool {
+    fn contains_key(&self, key: &'static str) -> bool {
         match *self {
             Properties::Single(k, _) if k == key => true,
             Properties::Map(ref m) => m.contains_key(key),
-            _ => false
+            _ => false,
         }
     }
 
     fn iter(&self) -> PropertiesIter {
         self.into_iter()
+    }
+
+    fn len(&self) -> usize {
+        match *self {
+            Properties::Empty => 0,
+            Properties::Single(_, _) => 1,
+            Properties::Map(ref m) => m.len(),
+        }
     }
 }
 
@@ -103,7 +201,7 @@ impl<'a> Extend<(&'static str, &'a Value)> for Properties {
         T: IntoIterator<Item = (&'static str, &'a Value)>
     {
         for (k, v) in iter {
-            if !self.contains(k) {
+            if !self.contains_key(k) {
                 self.insert(k, v.to_owned());
             }
         }
@@ -123,73 +221,37 @@ impl<'a> IntoIterator for &'a Properties {
     }
 }
 
-pub struct Builder {
-    ctxt: Option<BuilderCtxt>,
-}
-
-pub struct Logger {
-    ctxt: Option<Arc<LocalCtxt>>,
-}
-
-pub struct LogFuture<TFuture> {
-    logger: Logger,
-    inner: TFuture,
-}
-
-pub struct Log<'a, 'b> {
-    record: Record<'a>,
-    _logger: &'b Logger,
-}
-
-#[derive(Clone, Default, Debug)]
-struct LocalCtxt {
-    parent: Option<SharedCtxt>,
-    properties: Properties,
-}
-
-#[derive(Debug, Clone)]
-enum SharedCtxt {
-    Local(Arc<LocalCtxt>),
-    Joined(Arc<LocalCtxt>, Arc<LocalCtxt>),
-}
-
-thread_local!(static LOCAL_CTXT: RefCell<Option<SharedCtxt>> = RefCell::new(Default::default()));
-
-pub fn logger() -> Builder {
-    Builder {
-        ctxt: None,
-    }
-}
-
 impl<'a, 'b> Serialize for Log<'a, 'b> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         #[derive(Serialize)]
-        struct SerializeLog<'a> {
+        struct SerializeLog<'a, 'b> {
             #[serde(serialize_with = "serialize_msg")]
             msg: &'a Record<'a>,
-            #[serde(serialize_with = "serialize_ctxt")]
-            ctxt: (),
+            #[serde(serialize_with = "serialize_scope")]
+            scope: Scope<'b>,
         }
 
-        fn serialize_ctxt<S>(_: &(), serializer: S) -> Result<S::Ok, S::Error>
+        fn serialize_scope<S>(scope: &Scope, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
         {
-            LOCAL_CTXT.with(|shared| {
-                let shared = shared.borrow();
+            if let Some(ref ctxt) = scope.ctxt {
+                let properties = &ctxt.properties;
 
-                if let Some(ref ctxt) = *shared {
-                    let mut map = serializer.serialize_map(None)?;
-                    ctxt.serialize(&mut map)?;
-                    map.end()
+                let mut map = serializer.serialize_map(Some(properties.len()))?;
+                
+                for (k, v) in properties.iter() {
+                    map.serialize_entry(k, v)?;
                 }
-                else {
-                    serializer.serialize_none()
-                }
-            })
+                
+                map.end()
+            }
+            else {
+                serializer.serialize_none()
+            }
         }
 
         fn serialize_msg<'a, S>(record: &Record<'a>, serializer: S) -> Result<S::Ok, S::Error>
@@ -201,7 +263,7 @@ impl<'a, 'b> Serialize for Log<'a, 'b> {
 
         let log = SerializeLog {
             msg: &self.record,
-            ctxt: (),
+            scope: self.scope,
         };
 
         log.serialize(serializer)
@@ -209,183 +271,152 @@ impl<'a, 'b> Serialize for Log<'a, 'b> {
 }
 
 impl SharedCtxt {
-    fn current(&self) -> &Arc<LocalCtxt> {
-        match *self {
-            SharedCtxt::Local(ref local) => local,
-            SharedCtxt::Joined(_, ref local) => local,
-        }
-    }
-
-    fn is_joined(&self) -> bool {
-        match *self {
-            SharedCtxt::Local(_) => false,
-            _ => true
-        }
-    }
-
-    fn serialize<S>(&self, serializer: &mut S) -> Result<(), S::Error>
-    where
-        S: SerializeMap,
-    {
-        match *self {
-            SharedCtxt::Local(ref local) => local.serialize(serializer, |_| true)?,
-            SharedCtxt::Joined(ref shared, ref local) => {
-                local.serialize(serializer, |_| true)?;
-                shared.serialize(serializer, |kv| !local.properties.contains(kv.0))?;
-            }
-        }
-
-        Ok(())
-    }
-
-    // TODO: This is actually problematic
-    // Just because the immediate parent is the same context doesn't mean its parent is
-    fn push(shared: &mut Option<SharedCtxt>, ctxt: Arc<LocalCtxt>) {
-        if let Some(shared_ctxt) = shared.take() {
-            // Move out of the current shared context, just to avoid a clone
-            let shared_ctxt = match shared_ctxt {
-                SharedCtxt::Local(local) => local,
-                SharedCtxt::Joined(_, local) => local,
-            };
-
-            // Check if the parent of the context we're adding is the same as the current shared context
-            // - If they're the same, it means we're in the same context we were when `ctxt` was build
-            // - If they're not the same, it means `ctxt` has been moved somewhere (a different thread)
-            //   We can't just replace the `shared` context without losing information, so we join them together
-            match ctxt.parent.as_ref().map(|parent| parent.current()) {
-                Some(ctxt_parent) if Arc::ptr_eq(&shared_ctxt, ctxt_parent) => {
-                    *shared = Some(SharedCtxt::Local(ctxt))
-                },
-                _ => {
-                    *shared = Some(SharedCtxt::Joined(shared_ctxt, ctxt))
+    fn push(shared: &mut Option<SharedCtxt>, logger: &mut LocalCtxt) {
+        // Check whether there's already an active context
+        if let Some(ref mut shared_ctxt) = *shared {
+            // If we have a joined context, check it first
+            // If the shared context is invalid, then we might recreate it
+            if let Some(ref current) = logger.joined_ctxt {
+                if let Some(ref parent) = current.parent {
+                    if Arc::ptr_eq(&shared_ctxt.current, parent) {
+                        shared_ctxt.current = current.clone();
+                        return;
+                    }
                 }
+
+                logger.joined_ctxt = None;
+            }
+
+            // Check the parent of the original context
+            if let Some(ref current) = logger.original_ctxt {
+                if let Some(ref parent) = current.parent {
+                    if Arc::ptr_eq(&shared_ctxt.current, parent) {
+                        shared_ctxt.current = current.clone();
+                        return;
+                    }
+                }
+
+                let joined = Arc::new(Ctxt::from_shared(current.properties.clone(), Some(&shared_ctxt)));
+
+                logger.joined_ctxt = Some(joined.clone());
+                shared_ctxt.current = joined;
+                return;
             }
         }
         else {
-            *shared = Some(SharedCtxt::Local(ctxt));
+            // Make sure the joined context is `None`
+            // If this context is the root of this thread then there's no need for it
+            logger.joined_ctxt = None;
+
+            if let Some(ref current) = logger.original_ctxt {
+                *shared = Some(SharedCtxt {
+                    current: current.clone()
+                });
+            }
         }
     }
 
-    fn pop(shared: &mut Option<SharedCtxt>) -> Option<Arc<LocalCtxt>> {
-        match shared.take() {
-            Some(SharedCtxt::Local(local)) => {
-                *shared = local.parent.clone();
-                Some(local)
-            },
-            Some(SharedCtxt::Joined(parent, local)) => {
-                *shared = Some(SharedCtxt::Local(parent));
-                Some(local)
-            },
-            None => None
-        }
+    fn pop(shared: &mut Option<SharedCtxt>) {
+        *shared = shared.take()
+            .and_then(|ctxt| ctxt.current.parent
+                .as_ref()
+                .map(|current| SharedCtxt { current: current.clone() }));
     }
 }
 
-impl LocalCtxt {
-    fn serialize<S, F>(&self, serializer: &mut S, filter: F) -> Result<(), S::Error>
-    where
-        S: SerializeMap,
-        F: Fn(&(&'static str, &Value)) -> bool,
-    {
-        for (k, v) in self.properties.iter().filter(&filter) {
-            serializer.serialize_entry(k, v)?;
-        }
+impl Ctxt {
+    /// Create a local context from a set of properties and a shared context.
+    /// 
+    /// If the shared context is `Some`, then the local context will contain the union
+    /// of `properties` and the properties on the shared context.
+    fn from_shared(mut properties: Properties, shared: Option<&SharedCtxt>) -> Self {
+        properties
+            .extend(shared
+                .as_ref()
+                .map(|shared| &shared.current.properties)
+                .unwrap_or(&Properties::Empty));
 
-        // We only need to serialize the parent context if it's not the one we joined to
-        match self.parent {
-            Some(ref parent) if parent.is_joined() => {
-                parent.serialize(serializer)?;
-            },
-            _ => ()
+        Ctxt {
+            parent: shared.as_ref().map(|shared| shared.current.clone()),
+            properties,
         }
-
-        Ok(())
     }
 }
 
 impl Logger {
     fn scope<F, R>(&mut self, f: F) -> R
     where
-        F: FnOnce() -> R,
+        F: FnOnce(Scope) -> R,
     {
         // Set the current shared log context
         // This makes the context available to other loggers on this thread
         // within the `scope` function
         // TODO: Handle re-entrancy
-        LOCAL_CTXT.with(|shared| {
+        SHARED_CTXT.with(|shared| {
             struct SharedGuard<'a> {
                 shared: Option<&'a RefCell<Option<SharedCtxt>>>,
-                logger: &'a mut Logger,
             }
 
             impl<'a> Drop for SharedGuard<'a> {
                 fn drop(&mut self) {
                     if let Some(shared) = self.shared.take() {
-                        self.logger.ctxt = SharedCtxt::pop(&mut shared.borrow_mut());
+                        SharedCtxt::pop(&mut shared.borrow_mut());
                     }
                 }
             }
 
-            let guard = if let Some(ctxt) = self.ctxt.take() {
-                SharedCtxt::push(&mut shared.borrow_mut(), ctxt);
+            let guard = {
+                SharedCtxt::push(&mut shared.borrow_mut(), &mut self.ctxt);
                 SharedGuard {
                     shared: Some(&shared),
-                    logger: self,
-                }
-            }
-            else {
-                SharedGuard {
-                    shared: None,
-                    logger: self,
                 }
             };
 
-            let ret = f();
+            let current = {
+                shared.borrow().as_ref().map(|shared| shared.current.clone())
+            };
+
+            let ret = f(Scope {
+                ctxt: current.as_ref().map(|current| current.as_ref())
+            });
 
             drop(guard);
 
             ret
         })
     }
+}
 
-    pub fn log<'a, 'b>(&'b self, record: Record<'a>) -> Log<'a, 'b> {
+impl<'a> Scope<'a> {
+    fn log<'b>(self, record: Record<'b>) -> Log<'a, 'b> {
         Log {
             record,
-            _logger: self,
+            scope: self,
         }
     }
 
-    #[cfg(test)]
-    fn log_value<'a, 'b>(&'b self, record: Record<'a>) -> Value {
+    fn log_value<'b>(&self, record: Record<'b>) -> Value {
         serde_json::to_value(&self.log(record)).unwrap()
     }
 
-    #[cfg(test)]
-    fn log_string<'a, 'b>(&'b self, record: Record<'a>) -> String {
+    fn log_string<'b>(&self, record: Record<'b>) -> String {
         serde_json::to_string(&self.log(record)).unwrap()
     }
 }
 
 impl Builder {
+    /// Create a `Logger` with the built context.
+    /// 
+    /// Creating loggers with no context of their own is cheap.
     fn into_logger(self) -> Logger {
         // Capture the current context
         // Each logger keeps a copy of the context it was created in so it can be shared
         // This context is set by other loggers calling `.scope()`
         let ctxt = if let Some(ctxt) = self.ctxt {
-            LOCAL_CTXT.with(|shared| {
+            SHARED_CTXT.with(|shared| {
                 let shared = shared.borrow();
-                let mut properties = ctxt.properties;
-                
-                properties
-                    .extend(shared
-                        .as_ref()
-                        .map(|shared| &shared.current().properties)
-                        .unwrap_or(&Properties::Empty));
 
-                Some(Arc::new(LocalCtxt {
-                    parent: shared.to_owned(),
-                    properties,
-                }))
+                Some(Arc::new(Ctxt::from_shared(ctxt.properties, shared.as_ref())))
             })
         }
         else {
@@ -393,10 +424,17 @@ impl Builder {
         };
 
         Logger {
-            ctxt,
+            ctxt: LocalCtxt {
+                original_ctxt: ctxt,
+                joined_ctxt: None,
+            }
         }
     }
 
+    /// Set a property on the logger.
+    /// 
+    /// When there is a logger with enriched properties, any records logged within the
+    /// logger's `scope` will include those properties.
     pub fn enrich<V>(mut self, k: &'static str, v: V) -> Self
     where
         V: Into<Value>
@@ -407,6 +445,14 @@ impl Builder {
         self
     }
 
+    /// Enrich records logged within the scope using the properties configured.
+    /// 
+    /// This method returns a future.
+    /// Any record logged within that future will include the properties added using `enrich`.
+    /// 
+    /// **NOTE:** Properties are stored in thread-local storage.
+    /// If this future is sent to another thread it will carry its properties with it,
+    /// but if a thread is spawned without sending a scope then it won't carry properties.
     pub fn scope<F>(self, f: F) -> LogFuture<F::Future>
     where
         F: IntoFuture,
@@ -434,7 +480,7 @@ impl Builder {
     {
         let mut logger = self.into_logger();
 
-        logger.scope(f)
+        logger.scope(|_| f())
     }
     
     fn get(self) -> Logger {
@@ -453,7 +499,7 @@ where
         let inner = &mut self.inner;
         let logger = &mut self.logger;
 
-        logger.scope(|| inner.poll())
+        logger.scope(|_| inner.poll())
     }
 }
 
@@ -474,15 +520,32 @@ mod tests {
 
     #[test]
     fn basic() {
-        let logger = logger().get();
+        let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
 
-        let log = logger.log_value(record!());
-        
         let expected = json!({
-            "msg": "Hi user!"
+            "msg": "Hi user!",
+            "ctxt": Value::Null
         });
 
         assert_eq!(expected, log);
+    }
+
+    #[test]
+    fn enriched_empty() {
+        let _: Result<_, ()> = logger()
+            .scope_fn(|| {
+                let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
+
+                let expected = json!({
+                    "msg": "Hi user!",
+                    "ctxt": Value::Null
+                });
+
+                assert_eq!(expected, log);
+
+                Ok(())
+            })
+            .wait();
     }
 
     #[test]
@@ -491,7 +554,7 @@ mod tests {
             .enrich("correlation", "An Id")
             .enrich("service", "Banana")
             .scope_fn(|| {
-                let log = logger().get().log_value(record!());
+                let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
 
                 let expected = json!({
                     "msg": "Hi user!",
@@ -517,7 +580,7 @@ mod tests {
                 let log_1 = logger()
                     .enrich("service", "Mandarin")
                     .scope_fn(|| {
-                        let log = logger().get().log_value(record!());
+                        let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
 
                         let expected = json!({
                             "msg": "Hi user!",
@@ -535,7 +598,7 @@ mod tests {
                 let log_2 = logger()
                     .enrich("service", "Onion")
                     .scope_fn(|| {
-                        let log = logger().get().log_value(record!());
+                        let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
 
                         let expected = json!({
                             "msg": "Hi user!",
@@ -559,15 +622,13 @@ mod tests {
     fn enriched_multiple_threads() {
         let f = logger()
             .enrich("correlation", "An Id")
-            .enrich("operation ", "Logging")
+            .enrich("operation", "Logging")
             .enrich("service", "Banana")
             .scope(
                 logger()
                     .enrich("correlation", "Another Id")
                     .scope_fn(|| {
-                        LOCAL_CTXT.with(|shared| println!("{:?}", *shared.borrow()));
-                        
-                        let log = logger().get().log_value(record!());
+                        let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
 
                         let expected = json!({
                             "msg": "Hi user!",
@@ -600,6 +661,7 @@ mod tests {
 mod benches {
     extern crate test;
 
+    use futures::future;
     use log::{Level, RecordBuilder};
 
     use super::*;
@@ -622,10 +684,30 @@ mod benches {
     }
 
     #[bench]
+    fn poll_empty(b: &mut Bencher) {
+        let mut f = logger().scope(future::empty::<(), ()>());
+
+        b.iter(|| {
+            f.poll()
+        })
+    }
+
+    #[bench]
     fn serialize_log_empty(b: &mut Bencher) {
         b.iter(|| {
-            logger().get().log_value(record!())
+            logger().get().scope(|ctxt| ctxt.log_string(record!()));
         });
+    }
+
+    #[bench]
+    fn serialize_log_1(b: &mut Bencher) {
+        logger()
+            .enrich("correlation", "An Id")
+            .scope_sync(|| {
+                b.iter(|| {
+                    logger().get().scope(|ctxt| ctxt.log_string(record!()));
+                });
+            });
     }
 
     #[bench]
@@ -638,58 +720,13 @@ mod benches {
     }
 
     #[bench]
-    fn create_scope_2(b: &mut Bencher) {
-        b.iter(|| {
-            logger()
-                .enrich("correlation", "An Id")
-                .enrich("environment", "Test")
-                .scope_sync(|| ())
-        })
-    }
+    fn poll_scope_1(b: &mut Bencher) {
+        let mut f = logger()
+            .enrich("correlation", "An Id")
+            .scope(future::empty::<(), ()>());
 
-    #[bench]
-    fn create_scope_3(b: &mut Bencher) {
         b.iter(|| {
-            logger()
-                .enrich("correlation", "An Id")
-                .enrich("environment", "Test")
-                .enrich("context", "Stuff")
-                .scope_sync(|| ())
-        })
-    }
-
-    #[bench]
-    fn create_scope_3_numbers(b: &mut Bencher) {
-        b.iter(|| {
-            logger()
-                .enrich("correlation", 1)
-                .enrich("environment", 2)
-                .enrich("context", 3)
-                .scope_sync(|| ())
-        })
-    }
-
-    #[bench]
-    fn create_scope_4(b: &mut Bencher) {
-        b.iter(|| {
-            logger()
-                .enrich("correlation", "An Id")
-                .enrich("environment", "Test")
-                .enrich("context", "Stuff")
-                .enrich("more", "Even more")
-                .scope_sync(|| ())
-        })
-    }
-
-    #[bench]
-    fn create_scope_4_numbers(b: &mut Bencher) {
-        b.iter(|| {
-            logger()
-                .enrich("correlation", 1)
-                .enrich("environment", 2)
-                .enrich("context", 3)
-                .enrich("more", 4)
-                .scope_sync(|| ())
+            f.poll()
         })
     }
 
@@ -707,13 +744,32 @@ mod benches {
     }
 
     #[bench]
-    fn serialize_log_1(b: &mut Bencher) {
+    fn poll_scope_1_nested(b: &mut Bencher) {
+        let mut f = logger()
+            .enrich("correlation", "An Id")
+            .scope(logger()
+                .enrich("correlation", "An Id")
+                .scope(future::empty::<(), ()>()));
+
+        b.iter(|| {
+            f.poll()
+        })
+    }
+
+    #[bench]
+    fn create_scope_1_nested_2(b: &mut Bencher) {
         logger()
             .enrich("correlation", "An Id")
             .scope_sync(|| {
-                b.iter(|| {
-                    logger().get().log_value(record!())
-                });
+                logger()
+                    .enrich("correlation", "An Id")
+                    .scope_sync(|| {
+                        b.iter(|| {
+                            logger()
+                                .enrich("correlation", "An Id")
+                                .scope_sync(|| ())
+                        });
+                    });
             });
     }
 }
