@@ -16,13 +16,14 @@ extern crate serde;
 extern crate serde_derive;
 extern crate log;
 extern crate env_logger;
+extern crate take_mut;
 
 use std::sync::Arc;
 use std::ops::Drop;
 use std::mem;
 use std::iter::Extend;
 use std::io::Write;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map;
 
@@ -43,16 +44,21 @@ pub fn init() {
                     write!(buf, "{}: {}: {}", record.level(), buf.timestamp(), record.args())?;
 
                     if let Some(ctxt) = scope.ctxt {
-                        write!(buf, " (")?;
+                        let mut value_style = buf.style();
+                            
+                        value_style
+                            .set_bold(true);
+
+                        write!(buf, ": (")?;
 
                         let mut first = true;
                         for (k, v) in &ctxt.properties {
                             if first {
                                 first = false;
-                                write!(buf, "{}: {}", k, v)?;
+                                write!(buf, "{}: {}", k, value_style.value(v))?;
                             }
                             else {
-                                write!(buf, ", {}: {}", k, v)?;
+                                write!(buf, ", {}: {}", k, value_style.value(v))?;
                             }
                         }
 
@@ -96,7 +102,7 @@ pub struct Builder {
 }
 
 pub struct Logger {
-    ctxt: LocalCtxt,
+    ctxt: Option<LocalCtxt>,
 }
 
 pub struct LogFuture<TFuture> {
@@ -115,15 +121,20 @@ struct Ctxt {
     properties: Properties,
 }
 
-#[derive(Clone, Default, Debug)]
-struct LocalCtxt {
-    original_ctxt: Option<Arc<Ctxt>>,
-    joined_ctxt: Option<Arc<Ctxt>>,
+#[derive(Debug)]
+enum LocalCtxt {
+     Local {
+        local: Arc<Ctxt>,
+    },
+    Joined {
+        original: Arc<Ctxt>,
+        joined: Arc<Ctxt>,
+    },
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 struct SharedCtxt {
-    current: Arc<Ctxt>,
+    inner: Arc<Ctxt>,
 }
 
 #[derive(Clone, Copy)]
@@ -270,57 +281,99 @@ impl<'a, 'b> Serialize for Log<'a, 'b> {
     }
 }
 
-impl SharedCtxt {
-    fn push(shared: &mut Option<SharedCtxt>, logger: &mut LocalCtxt) {
-        // Check whether there's already an active context
-        if let Some(ref mut shared_ctxt) = *shared {
-            // If we have a joined context, check it first
-            // If the shared context is invalid, then we might recreate it
-            if let Some(ref current) = logger.joined_ctxt {
-                if let Some(ref parent) = current.parent {
-                    if Arc::ptr_eq(&shared_ctxt.current, parent) {
-                        shared_ctxt.current = current.clone();
-                        return;
-                    }
-                }
-
-                logger.joined_ctxt = None;
+impl LocalCtxt {
+    fn clear_joined(&mut self) {
+        take_mut::take(self, |ctxt| {
+            if let LocalCtxt::Joined { original, .. } = ctxt {
+                LocalCtxt::Local { local: original }
             }
-
-            // Check the parent of the original context
-            if let Some(ref current) = logger.original_ctxt {
-                if let Some(ref parent) = current.parent {
-                    if Arc::ptr_eq(&shared_ctxt.current, parent) {
-                        shared_ctxt.current = current.clone();
-                        return;
-                    }
-                }
-
-                let joined = Arc::new(Ctxt::from_shared(current.properties.clone(), Some(&shared_ctxt)));
-
-                logger.joined_ctxt = Some(joined.clone());
-                shared_ctxt.current = joined;
-                return;
+            else {
+                ctxt
             }
+        })
+    }
+
+    fn set_joined(&mut self, joined: Arc<Ctxt>) {
+        take_mut::take(self, |ctxt| {
+            match ctxt {
+                LocalCtxt::Local { local } => {
+                    LocalCtxt::Joined { original: local, joined }
+                }
+                LocalCtxt::Joined { original, .. } => {
+                    LocalCtxt::Joined { original, joined }
+                }
+            }
+        });
+    }
+
+    fn current(&self) -> &Arc<Ctxt> {
+        match *self {
+            LocalCtxt::Local { ref local } => local,
+            LocalCtxt::Joined { ref joined, .. } => joined,
         }
-        else {
-            // Make sure the joined context is `None`
-            // If this context is the root of this thread then there's no need for it
-            logger.joined_ctxt = None;
+    }
+}
 
-            if let Some(ref current) = logger.original_ctxt {
+impl SharedCtxt {
+    fn current(&self) -> &Arc<Ctxt> {
+        &self.inner
+    }
+
+    fn push(shared: &mut Option<SharedCtxt>, logger: Option<&mut LocalCtxt>) {
+        if let Some(incoming_ctxt) = logger {
+            // Check whether there's already an active context
+            if let Some(ref mut shared_ctxt) = *shared {
+                // If we have a joined context, check it first
+                // If the shared context is invalid, then we might recreate it
+                if let LocalCtxt::Joined { ref joined, .. } = *incoming_ctxt {
+                    if let Some(ref parent) = joined.parent {
+                        if Arc::ptr_eq(&shared_ctxt.current(), parent) {
+                            shared_ctxt.inner = joined.clone();
+                            return;
+                        }
+                    }
+
+                    incoming_ctxt.clear_joined();
+                }
+
+                // Check the parent of the original context
+                if let LocalCtxt::Local { ref local, .. } = *incoming_ctxt {
+                    if let Some(ref parent) = local.parent {
+                        if Arc::ptr_eq(&shared_ctxt.current(), parent) {
+                            shared_ctxt.inner = local.clone();
+                            return;
+                        }
+                    }
+
+                    // If the original context isn't a child of the current one, create
+                    // a new joined context that combines them.
+                    let joined = Arc::new(Ctxt::from_shared(local.properties.clone(), Some(&shared_ctxt)));
+                    incoming_ctxt.set_joined(joined);
+
+                    shared_ctxt.inner = incoming_ctxt.current().clone();
+                    return;
+                }
+
+                unreachable!();
+            }
+            else {
+                // Make sure the joined context is `None`
+                // If this context is the root of this thread then there's no need for it
+                incoming_ctxt.clear_joined();
+
                 *shared = Some(SharedCtxt {
-                    current: current.clone()
+                    inner: incoming_ctxt.current().clone()
                 });
             }
         }
     }
 
-    fn pop(shared: &mut Option<SharedCtxt>) {
-        *shared = shared.take()
-            .and_then(|ctxt| ctxt.current.parent
-                .as_ref()
-                .map(|current| SharedCtxt { current: current.clone() }));
+    fn pop(shared: &mut Option<SharedCtxt>, logger: Option<&LocalCtxt>) {
+        if logger.is_some() {
+            *shared = shared.take()
+                .and_then(|shared| shared.current().parent.clone())
+                .map(|local| SharedCtxt { inner: local });
+        }
     }
 }
 
@@ -333,11 +386,11 @@ impl Ctxt {
         properties
             .extend(shared
                 .as_ref()
-                .map(|shared| &shared.current.properties)
+                .map(|shared| &shared.current().properties)
                 .unwrap_or(&Properties::Empty));
 
         Ctxt {
-            parent: shared.as_ref().map(|shared| shared.current.clone()),
+            parent: shared.as_ref().map(|shared| shared.current().clone()),
             properties,
         }
     }
@@ -355,25 +408,27 @@ impl Logger {
         SHARED_CTXT.with(|shared| {
             struct SharedGuard<'a> {
                 shared: Option<&'a RefCell<Option<SharedCtxt>>>,
+                logger: Option<&'a LocalCtxt>,
             }
 
             impl<'a> Drop for SharedGuard<'a> {
                 fn drop(&mut self) {
                     if let Some(shared) = self.shared.take() {
-                        SharedCtxt::pop(&mut shared.borrow_mut());
+                        SharedCtxt::pop(&mut shared.borrow_mut(), self.logger);
                     }
                 }
             }
 
             let guard = {
-                SharedCtxt::push(&mut shared.borrow_mut(), &mut self.ctxt);
+                SharedCtxt::push(&mut shared.borrow_mut(), self.ctxt.as_mut());
                 SharedGuard {
                     shared: Some(&shared),
+                    logger: self.ctxt.as_ref(),
                 }
             };
 
             let current = {
-                shared.borrow().as_ref().map(|shared| shared.current.clone())
+                shared.borrow().as_ref().map(|shared| shared.current().clone())
             };
 
             let ret = f(Scope {
@@ -424,10 +479,7 @@ impl Builder {
         };
 
         Logger {
-            ctxt: LocalCtxt {
-                original_ctxt: ctxt,
-                joined_ctxt: None,
-            }
+            ctxt: ctxt.map(|local| LocalCtxt::Local { local })
         }
     }
 
@@ -524,7 +576,7 @@ mod tests {
 
         let expected = json!({
             "msg": "Hi user!",
-            "ctxt": Value::Null
+            "scope": Value::Null
         });
 
         assert_eq!(expected, log);
@@ -538,7 +590,7 @@ mod tests {
 
                 let expected = json!({
                     "msg": "Hi user!",
-                    "ctxt": Value::Null
+                    "scope": Value::Null
                 });
 
                 assert_eq!(expected, log);
@@ -558,7 +610,7 @@ mod tests {
 
                 let expected = json!({
                     "msg": "Hi user!",
-                    "ctxt": {
+                    "scope": {
                         "correlation": "An Id",
                         "service": "Banana"
                     }
@@ -584,7 +636,7 @@ mod tests {
 
                         let expected = json!({
                             "msg": "Hi user!",
-                            "ctxt": {
+                            "scope": {
                                 "correlation": "An Id",
                                 "service": "Mandarin"
                             }
@@ -602,7 +654,7 @@ mod tests {
 
                         let expected = json!({
                             "msg": "Hi user!",
-                            "ctxt": {
+                            "scope": {
                                 "correlation": "An Id",
                                 "service": "Onion"
                             }
@@ -632,7 +684,7 @@ mod tests {
 
                         let expected = json!({
                             "msg": "Hi user!",
-                            "ctxt": {
+                            "scope": {
                                 "correlation": "Another Id",
                                 "context": "bg-thread",
                                 "operation": "Logging",
@@ -661,6 +713,7 @@ mod tests {
 mod benches {
     extern crate test;
 
+    use std::rc::Rc;
     use futures::future;
     use log::{Level, RecordBuilder};
 
@@ -674,6 +727,24 @@ mod benches {
                 .level(Level::Info)
                 .build()
         };
+    }
+
+    #[bench]
+    fn clone_rc_ctxt(b: &mut Bencher) {
+        let ctxt = Rc::new(Ctxt { parent: None, properties: Properties::Empty });
+
+        b.iter(|| {
+            ctxt.clone();
+        })
+    }
+
+    #[bench]
+    fn clone_arc_ctxt(b: &mut Bencher) {
+        let ctxt = Arc::new(Ctxt { parent: None, properties: Properties::Empty });
+
+        b.iter(|| {
+            ctxt.clone();
+        })
     }
 
     #[bench]
