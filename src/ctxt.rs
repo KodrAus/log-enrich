@@ -152,12 +152,10 @@ impl LocalCtxt {
 
 impl LocalCtxtKind {
     fn clear_joined(&mut self) {
-        take_mut::take(self, |ctxt| {
-            match ctxt {
-                ctxt @ LocalCtxtKind::Local { .. } => ctxt,
-                LocalCtxtKind::Joined { original, .. } => LocalCtxtKind::Local { local: original },
-                LocalCtxtKind::__Uninitialized => panic!("attempted to use uninitialised context"),
-            }
+        take_mut::take(self, |ctxt| match ctxt {
+            ctxt @ LocalCtxtKind::Local { .. } => ctxt,
+            LocalCtxtKind::Joined { original, .. } => LocalCtxtKind::Local { local: original },
+            LocalCtxtKind::__Uninitialized => panic!("attempted to use uninitialised context"),
         })
     }
 

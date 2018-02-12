@@ -11,3 +11,7 @@ serde_json = "*"
 log = "*"
 env_logger = "*"
 take_mut = "*"
+
+[dev-dependencies]
+futures-await = "*"
+futures-cpupool = "*"

@@ -4,12 +4,12 @@ use stdlog::Record;
 use env_logger::Formatter;
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
-use logger;
+use current_logger;
 use ctxt::Ctxt;
 
 pub fn format() -> impl Fn(&mut Formatter, &Record) -> io::Result<()> {
     |buf, record| {
-        logger().get().scope(|mut scope| do catch {
+        current_logger().scope(|mut scope| do catch {
             write!(
                 buf,
                 "{}: {}: {}",
@@ -45,7 +45,8 @@ pub fn format() -> impl Fn(&mut Formatter, &Record) -> io::Result<()> {
     }
 }
 
-pub struct Log<'a, 'b> {
+#[allow(unused)]
+pub(crate) struct Log<'a, 'b> {
     ctxt: Option<&'a Ctxt>,
     record: Record<'b>,
 }

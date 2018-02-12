@@ -2,27 +2,25 @@
 extern crate log;
 extern crate log_enrich;
 
+use log_enrich::sync::logger;
+
 fn main() {
     log_enrich::init();
 
-    log_enrich::logger()
-        .enrich("service", "basic.rs")
-        .scope_sync(|| {
-            info!("starting up");
+    logger().enrich("service", "basic.rs").scope(|| {
+        info!("starting up");
 
-            log_enrich::logger()
-                .enrich("correlation", "Some Id")
-                .enrich("operation", "request")
-                .scope_sync(|| {
-                    info!("handling a request for {}", "Timmy");
+        logger()
+            .enrich("correlation", "Some Id")
+            .enrich("operation", "request")
+            .scope(|| {
+                info!("handling a request for {}", "Timmy");
 
-                    log_enrich::logger()
-                        .enrich("operation", "database")
-                        .scope_sync(|| {
-                            info!("doing database stuff");
-                        });
+                logger().enrich("operation", "database").scope(|| {
+                    info!("doing database stuff");
                 });
+            });
 
-            info!("finishing up");
-        });
+        info!("finishing up");
+    });
 }
