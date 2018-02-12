@@ -44,7 +44,7 @@ pub(crate) struct SharedCtxt {
 impl Default for SharedCtxt {
     fn default() -> Self {
         SharedCtxt {
-            inner: LocalCtxtKind::__Uninitialized
+            inner: LocalCtxtKind::__Uninitialized,
         }
     }
 }
@@ -62,17 +62,13 @@ impl<'a> ScopeCtxt<'a> {
     fn get(&mut self) -> Option<&Arc<Ctxt>> {
         match *self {
             ScopeCtxt::Lazy(_) => {
-                let current = SHARED_CTXT.with(|shared| {
-                    shared.borrow().current().cloned()
-                });
+                let current = SHARED_CTXT.with(|shared| shared.borrow().current().cloned());
 
-                take_mut::take(self, |_| {
-                    ScopeCtxt::Loaded(current)
-                });
-                
+                take_mut::take(self, |_| ScopeCtxt::Loaded(current));
+
                 self.get()
-            },
-            ScopeCtxt::Loaded(ref ctxt) => ctxt.as_ref()
+            }
+            ScopeCtxt::Loaded(ref ctxt) => ctxt.as_ref(),
         }
     }
 }
@@ -120,16 +116,14 @@ impl<'a> Scope<'a> {
 impl LocalCtxt {
     pub(crate) fn new(ctxt: Arc<Ctxt>) -> Self {
         LocalCtxt {
-            inner: LocalCtxtInner::Owned(LocalCtxtKind::Local { local: ctxt })
+            inner: LocalCtxtInner::Owned(LocalCtxtKind::Local { local: ctxt }),
         }
     }
 
     fn swap(&mut self) {
-        take_mut::take(&mut self.inner, |local| {
-            match local {
-                LocalCtxtInner::Owned(kind) => LocalCtxtInner::Swapped(kind),
-                LocalCtxtInner::Swapped(kind) => LocalCtxtInner::Owned(kind),
-            }
+        take_mut::take(&mut self.inner, |local| match local {
+            LocalCtxtInner::Owned(kind) => LocalCtxtInner::Swapped(kind),
+            LocalCtxtInner::Swapped(kind) => LocalCtxtInner::Owned(kind),
         })
     }
 
@@ -174,7 +168,7 @@ impl LocalCtxtKind {
                 joined,
             },
             LocalCtxtKind::Joined { original, .. } => LocalCtxtKind::Joined { original, joined },
-            LocalCtxtKind::__Uninitialized => panic!("attempted to use uninitialised context")
+            LocalCtxtKind::__Uninitialized => panic!("attempted to use uninitialised context"),
         });
     }
 
@@ -182,7 +176,7 @@ impl LocalCtxtKind {
         match *self {
             LocalCtxtKind::Local { ref local } => Some(local),
             LocalCtxtKind::Joined { ref joined, .. } => Some(joined),
-            LocalCtxtKind::__Uninitialized => None
+            LocalCtxtKind::__Uninitialized => None,
         }
     }
 }
@@ -194,7 +188,7 @@ impl SharedCtxt {
 
     pub(crate) fn scope_current<F, R>(f: F) -> R
     where
-        F: FnOnce(Scope) -> R
+        F: FnOnce(Scope) -> R,
     {
         SHARED_CTXT.with(|shared| {
             f(Scope {
@@ -205,7 +199,7 @@ impl SharedCtxt {
 
     pub(crate) fn scope<F, R>(local: Option<&mut LocalCtxt>, f: F) -> R
     where
-        F: FnOnce(Scope) -> R
+        F: FnOnce(Scope) -> R,
     {
         SHARED_CTXT.with(|shared| {
             let guard = SharedGuard::local(&shared, local);
@@ -225,8 +219,8 @@ impl SharedCtxt {
             LocalCtxtInner::Owned(ref mut kind) => {
                 mem::swap(&mut self.inner, kind);
                 local.swap();
-            },
-            LocalCtxtInner::Swapped(_) => panic!("the local context has already been swapped")
+            }
+            LocalCtxtInner::Swapped(_) => panic!("the local context has already been swapped"),
         }
     }
 
@@ -235,8 +229,8 @@ impl SharedCtxt {
             LocalCtxtInner::Swapped(ref mut kind) => {
                 mem::swap(&mut self.inner, kind);
                 local.swap();
-            },
-            LocalCtxtInner::Owned(_) => panic!("the local context hasn't been swapped")
+            }
+            LocalCtxtInner::Owned(_) => panic!("the local context hasn't been swapped"),
         }
     }
 

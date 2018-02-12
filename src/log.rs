@@ -4,7 +4,7 @@ use stdlog::Record;
 use env_logger::Formatter;
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
-use ::logger;
+use logger;
 use ctxt::Ctxt;
 
 pub fn format() -> impl Fn(&mut Formatter, &Record) -> io::Result<()> {

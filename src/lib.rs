@@ -8,6 +8,7 @@ It's compatible with `log`.
 #![feature(nll, catch_expr, conservative_impl_trait)]
 #![cfg_attr(test, feature(test))]
 
+extern crate backtrace;
 extern crate env_logger;
 extern crate futures;
 extern crate log as stdlog;
@@ -17,7 +18,6 @@ extern crate serde_derive;
 #[cfg_attr(test, macro_use)]
 extern crate serde_json;
 extern crate take_mut;
-extern crate backtrace;
 
 mod ctxt;
 mod log;
@@ -28,7 +28,7 @@ use std::sync::Arc;
 use futures::{Future, IntoFuture, Lazy, Poll};
 use futures::future::lazy;
 
-use self::ctxt::{Ctxt, LocalCtxt, SharedCtxt, Scope};
+use self::ctxt::{Ctxt, LocalCtxt, Scope, SharedCtxt};
 use self::properties::Properties;
 
 pub use serde_json::Value;
@@ -71,10 +71,7 @@ impl Builder {
         // This context is set by other loggers calling `.scope()`
         let ctxt = if let Some(ctxt) = self.ctxt {
             SharedCtxt::scope_current(|mut scope| {
-                Some(Arc::new(Ctxt::from_scope(
-                    ctxt.properties,
-                    &mut scope,
-                )))
+                Some(Arc::new(Ctxt::from_scope(ctxt.properties, &mut scope)))
             })
         } else {
             None
@@ -363,17 +360,13 @@ mod tests {
 
     #[bench]
     fn serialize_log_empty(b: &mut Bencher) {
-        b.iter(|| {
-            log_string()
-        });
+        b.iter(|| log_string());
     }
 
     #[bench]
     fn serialize_log_1(b: &mut Bencher) {
         logger().enrich("correlation", "An Id").scope_sync(|| {
-            b.iter(|| {
-                log_string()
-            });
+            b.iter(|| log_string());
         });
     }
 

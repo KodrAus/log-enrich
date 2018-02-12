@@ -15,6 +15,12 @@ fn main() {
                 .enrich("operation", "request")
                 .scope_sync(|| {
                     info!("handling a request for {}", "Timmy");
+
+                    log_enrich::logger()
+                        .enrich("operation", "database")
+                        .scope_sync(|| {
+                            info!("doing database stuff");
+                        });
                 });
 
             info!("finishing up");
