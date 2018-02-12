@@ -3,6 +3,11 @@ use std::collections::hash_map::{self, HashMap};
 
 use serde_json::Value;
 
+/**
+A map of enriched properties.
+
+This map is optimised for contexts that are empty or contain a single property.
+*/
 #[derive(Clone, Debug)]
 pub(crate) enum Properties {
     Empty,

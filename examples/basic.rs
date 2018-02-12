@@ -1,3 +1,7 @@
+/*!
+Try setting the `RUST_LOG` environment variable to `info` and run this example.
+*/
+
 #[macro_use]
 extern crate log;
 extern crate log_enrich;

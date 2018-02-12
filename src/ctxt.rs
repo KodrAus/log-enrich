@@ -1,3 +1,17 @@
+/*
+Log context plumbing.
+
+There's a lot of implementation details in this module for capturing and hydrating log contexts.
+There are a few things that drive its design:
+
+- Futures-based scopes should be cheap to poll (they might get polled a lot)
+- Getting properties from a context should be cheap. A single scope will have multiple logs recorded, or none
+- Scopes aren't used extensively
+- Scopes usually have a single property
+
+Most of this module isn't directly exposed to users, they can't currently interact with contexts directly.
+*/
+
 use std::mem;
 use std::sync::Arc;
 use std::cell::RefCell;
@@ -7,12 +21,26 @@ use properties::Properties;
 
 thread_local!(static SHARED_CTXT: RefCell<SharedCtxt> = RefCell::new(Default::default()));
 
+/**
+A log context.
+
+Each context contains a reference back to its parent and a set of properties.
+The parent is used to check whether the context is being re-hydrated in the same context it was created in.
+It's ok of it wasn't, that just means we need to re-create it.
+*/
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Ctxt {
     parent: Option<Arc<Ctxt>>,
     properties: Properties,
 }
 
+/**
+A local context owned by a logger.
+
+These contexts are pushed and popped from a shared context in scopes.
+While the logger is in a scope it won't contain its original context.
+That'll be restored before the scope returns.
+*/
 #[derive(Debug)]
 pub(crate) struct LocalCtxt {
     inner: LocalCtxtInner,
@@ -20,48 +48,87 @@ pub(crate) struct LocalCtxt {
 
 #[derive(Debug)]
 enum LocalCtxtInner {
-    Owned(LocalCtxtKind),
-    Swapped(LocalCtxtKind),
+    /**
+    The context is the one originally owned by the logger.
+    */
+    Owned(CtxtKind),
+    /**
+    The context has been temporarily swapped with a shared one.
+    */
+    Swapped(CtxtKind),
 }
 
 #[derive(Debug)]
-enum LocalCtxtKind {
+enum CtxtKind {
+    /**
+    An original, local context.
+
+    The parent of this conext will be the one that it was originally created in.
+    */
     Local {
         local: Arc<Ctxt>,
     },
+    /**
+    A joined context.
+
+    If a context is sent to another thread, it might be hydrated with a different parent.
+    That means we can't just clobber the shared context that's already on that thread, or properties might be lost.
+    Instead we create a new context and cache it for the next time.
+    */
     Joined {
         original: Arc<Ctxt>,
         joined: Arc<Ctxt>,
     },
-    __Uninitialized,
+    /**
+    An empty context.
+
+    This variant is only used by `SharedCtxt` as a starting point.
+    If a `LocalCtxt` attempts to use an empty context it will probably panic (that's a bug).
+    */
+    Empty,
 }
 
+/**
+A shared context.
+
+Shared contexts are thread-local and make the currently scoped context available to loggers.
+*/
 #[derive(Debug)]
 pub(crate) struct SharedCtxt {
-    inner: LocalCtxtKind,
+    inner: CtxtKind,
 }
 
 impl Default for SharedCtxt {
     fn default() -> Self {
         SharedCtxt {
-            inner: LocalCtxtKind::__Uninitialized,
+            inner: CtxtKind::Empty,
         }
     }
 }
 
-enum ScopeCtxt<'a> {
-    Lazy(&'a SharedGuard<'a>),
+/**
+A scope handle.
+
+The handle allows a scoped closure to get a copy of the current context.
+This context will be lazily fetched the first time it's asked for.
+*/
+pub(crate) struct Scope {
+    ctxt: ScopeCtxt,
+}
+
+enum ScopeCtxt {
+    Lazy,
     Loaded(Option<Arc<Ctxt>>),
 }
 
-impl<'a> ScopeCtxt<'a> {
-    fn new(guard: &'a SharedGuard<'a>) -> Self {
-        ScopeCtxt::Lazy(guard)
+impl ScopeCtxt {
+    fn new() -> Self {
+        ScopeCtxt::Lazy
     }
 
     fn get(&mut self) -> Option<&Arc<Ctxt>> {
         match *self {
-            ScopeCtxt::Lazy(_) => {
+            ScopeCtxt::Lazy => {
                 let current = SHARED_CTXT.with(|shared| shared.borrow().current().cloned());
 
                 *self = ScopeCtxt::Loaded(current);
@@ -73,41 +140,13 @@ impl<'a> ScopeCtxt<'a> {
     }
 }
 
-pub(crate) struct Scope<'a> {
-    ctxt: ScopeCtxt<'a>,
-}
-
-struct SharedGuard<'a> {
-    shared: Option<&'a RefCell<SharedCtxt>>,
-    local: Option<&'a mut LocalCtxt>,
-}
-
-impl<'a> SharedGuard<'a> {
-    fn current(shared: &'a RefCell<SharedCtxt>) -> Self {
-        SharedGuard {
-            shared: Some(&shared),
-            local: None,
+impl Scope {
+    fn new() -> Self {
+        Scope {
+            ctxt: ScopeCtxt::new()
         }
     }
 
-    fn local(shared: &'a RefCell<SharedCtxt>, mut local: &'a mut LocalCtxt) -> Self {
-        SharedCtxt::push(&mut shared.borrow_mut(), &mut local);
-        SharedGuard {
-            shared: Some(&shared),
-            local: Some(local),
-        }
-    }
-}
-
-impl<'a> Drop for SharedGuard<'a> {
-    fn drop(&mut self) {
-        if let (Some(shared), Some(local)) = (self.shared.take(), self.local.take()) {
-            SharedCtxt::pop(&mut shared.borrow_mut(), local);
-        }
-    }
-}
-
-impl<'a> Scope<'a> {
     pub(crate) fn current(&mut self) -> Option<&Ctxt> {
         self.ctxt.get().map(|ctxt| ctxt.as_ref())
     }
@@ -116,33 +155,50 @@ impl<'a> Scope<'a> {
 impl LocalCtxt {
     pub(crate) fn new(ctxt: Arc<Ctxt>) -> Self {
         LocalCtxt {
-            inner: LocalCtxtInner::Owned(LocalCtxtKind::Local { local: ctxt }),
+            inner: LocalCtxtInner::Owned(CtxtKind::Local { local: ctxt }),
         }
     }
 
-    fn swap(&mut self) {
+    fn swap(&mut self, swap: &mut CtxtKind) {
         take_mut::take(&mut self.inner, |local| match local {
-            LocalCtxtInner::Owned(kind) => LocalCtxtInner::Swapped(kind),
-            LocalCtxtInner::Swapped(kind) => LocalCtxtInner::Owned(kind),
+            LocalCtxtInner::Owned(mut kind) => {
+                mem::swap(swap, &mut kind);
+                LocalCtxtInner::Swapped(kind)
+            },
+            LocalCtxtInner::Swapped(mut kind) => {
+                mem::swap(swap, &mut kind);
+                LocalCtxtInner::Owned(kind)
+            },
         })
     }
 
     fn clear_joined(&mut self) {
-        self.kind_mut().clear_joined()
+        take_mut::take(self.kind_mut(), |ctxt| match ctxt {
+            ctxt @ CtxtKind::Local { .. } => ctxt,
+            CtxtKind::Joined { original, .. } => CtxtKind::Local { local: original },
+            CtxtKind::Empty => panic!("attempted to use empty context"),
+        })
     }
 
     fn set_joined(&mut self, joined: Arc<Ctxt>) {
-        self.kind_mut().set_joined(joined)
+        take_mut::take(self.kind_mut(), |ctxt| match ctxt {
+            CtxtKind::Local { local } => CtxtKind::Joined {
+                original: local,
+                joined,
+            },
+            CtxtKind::Joined { original, .. } => CtxtKind::Joined { original, joined },
+            CtxtKind::Empty => panic!("attempted to use empty context"),
+        });
     }
 
-    fn kind(&self) -> &LocalCtxtKind {
+    fn kind(&self) -> &CtxtKind {
         match self.inner {
             LocalCtxtInner::Owned(ref kind) => kind,
             LocalCtxtInner::Swapped(_) => panic!("attempted to use swapped context"),
         }
     }
 
-    fn kind_mut(&mut self) -> &mut LocalCtxtKind {
+    fn kind_mut(&mut self) -> &mut CtxtKind {
         match self.inner {
             LocalCtxtInner::Owned(ref mut kind) => kind,
             LocalCtxtInner::Swapped(_) => panic!("attempted to use swapped context"),
@@ -150,57 +206,53 @@ impl LocalCtxt {
     }
 }
 
-impl LocalCtxtKind {
-    fn clear_joined(&mut self) {
-        take_mut::take(self, |ctxt| match ctxt {
-            ctxt @ LocalCtxtKind::Local { .. } => ctxt,
-            LocalCtxtKind::Joined { original, .. } => LocalCtxtKind::Local { local: original },
-            LocalCtxtKind::__Uninitialized => panic!("attempted to use uninitialised context"),
-        })
-    }
-
-    fn set_joined(&mut self, joined: Arc<Ctxt>) {
-        take_mut::take(self, |ctxt| match ctxt {
-            LocalCtxtKind::Local { local } => LocalCtxtKind::Joined {
-                original: local,
-                joined,
-            },
-            LocalCtxtKind::Joined { original, .. } => LocalCtxtKind::Joined { original, joined },
-            LocalCtxtKind::__Uninitialized => panic!("attempted to use uninitialised context"),
-        });
-    }
-}
-
 impl SharedCtxt {
     fn current(&self) -> Option<&Arc<Ctxt>> {
         match self.inner {
-            LocalCtxtKind::Local { ref local } => Some(local),
-            LocalCtxtKind::Joined { ref joined, .. } => Some(joined),
-            LocalCtxtKind::__Uninitialized => None,
+            CtxtKind::Local { ref local } => Some(local),
+            CtxtKind::Joined { ref joined, .. } => Some(joined),
+            CtxtKind::Empty => None,
         }
     }
 
     pub(crate) fn scope_current<F, R>(f: F) -> R
     where
-        F: FnOnce(Scope) -> R,
+        F: FnOnce(&mut Scope) -> R,
     {
-        SHARED_CTXT.with(|shared| {
-            f(Scope {
-                ctxt: ScopeCtxt::new(&SharedGuard::current(&shared)),
-            })
-        })
+        f(&mut Scope::new())
     }
 
     pub(crate) fn scope<F, R>(local: &mut LocalCtxt, f: F) -> R
     where
-        F: FnOnce(Scope) -> R,
+        F: FnOnce(&mut Scope) -> R,
     {
-        SHARED_CTXT.with(|shared| {
-            let guard = SharedGuard::local(&shared, local);
+        struct SharedGuard<'a> {
+            shared: Option<&'a RefCell<SharedCtxt>>,
+            local: Option<&'a mut LocalCtxt>,
+        }
 
-            let ret = f(Scope {
-                ctxt: ScopeCtxt::new(&guard),
-            });
+        impl<'a> SharedGuard<'a> {
+            fn new(shared: &'a RefCell<SharedCtxt>, mut local: &'a mut LocalCtxt) -> Self {
+                SharedCtxt::push(&mut shared.borrow_mut(), &mut local);
+                SharedGuard {
+                    shared: Some(&shared),
+                    local: Some(local),
+                }
+            }
+        }
+
+        impl<'a> Drop for SharedGuard<'a> {
+            fn drop(&mut self) {
+                if let (Some(shared), Some(local)) = (self.shared.take(), self.local.take()) {
+                    SharedCtxt::pop(&mut shared.borrow_mut(), local);
+                }
+            }
+        }
+
+        SHARED_CTXT.with(|shared| {
+            let guard = SharedGuard::new(&shared, local);
+
+            let ret = f(&mut Scope::new());
 
             drop(guard);
 
@@ -209,22 +261,20 @@ impl SharedCtxt {
     }
 
     fn swap_into_self(&mut self, local: &mut LocalCtxt) {
-        match local.inner {
-            LocalCtxtInner::Owned(ref mut kind) => {
-                mem::swap(&mut self.inner, kind);
-                local.swap();
-            }
-            LocalCtxtInner::Swapped(_) => panic!("the local context has already been swapped"),
+        if let LocalCtxtInner::Owned(_) = local.inner {
+            local.swap(&mut self.inner);
+        }
+        else {
+            panic!("the local context has already been swapped");
         }
     }
 
     fn swap_out_of_self(&mut self, local: &mut LocalCtxt) {
-        match local.inner {
-            LocalCtxtInner::Swapped(ref mut kind) => {
-                mem::swap(&mut self.inner, kind);
-                local.swap();
-            }
-            LocalCtxtInner::Owned(_) => panic!("the local context hasn't been swapped"),
+        if let LocalCtxtInner::Swapped(_) = local.inner {
+            local.swap(&mut self.inner);
+        }
+        else {
+            panic!("the local context hasn't been swapped");
         }
     }
 
@@ -233,7 +283,7 @@ impl SharedCtxt {
         if let Some(shared_ctxt) = shared.current() {
             // If we have a joined context, check it first
             // If the shared context is invalid, then we might recreate it
-            if let LocalCtxtKind::Joined { ref joined, .. } = *incoming.kind() {
+            if let CtxtKind::Joined { ref joined, .. } = *incoming.kind() {
                 if let Some(ref parent) = joined.parent {
                     if Arc::ptr_eq(shared_ctxt, parent) {
                         shared.swap_into_self(incoming);
@@ -245,7 +295,7 @@ impl SharedCtxt {
             }
 
             // Check the parent of the original context
-            if let LocalCtxtKind::Local { ref local, .. } = *incoming.kind() {
+            if let CtxtKind::Local { ref local, .. } = *incoming.kind() {
                 if let Some(ref parent) = local.parent {
                     if Arc::ptr_eq(shared_ctxt, parent) {
                         shared.swap_into_self(incoming);
@@ -265,7 +315,7 @@ impl SharedCtxt {
                 return;
             }
 
-            if let LocalCtxtKind::__Uninitialized = *incoming.kind() {
+            if let CtxtKind::Empty = *incoming.kind() {
                 panic!("attempted to use uninitialised context");
             }
 
@@ -276,7 +326,7 @@ impl SharedCtxt {
             incoming.clear_joined();
 
             let mut root_ctxt = SharedCtxt {
-                inner: LocalCtxtKind::__Uninitialized,
+                inner: CtxtKind::Empty,
             };
 
             root_ctxt.swap_into_self(incoming);

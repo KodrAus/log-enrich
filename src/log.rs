@@ -7,9 +7,12 @@ use serde::ser::{Serialize, SerializeMap, Serializer};
 use current_logger;
 use ctxt::Ctxt;
 
+/**
+Enriched-property aware log format.
+*/
 pub fn format() -> impl Fn(&mut Formatter, &Record) -> io::Result<()> {
     |buf, record| {
-        current_logger().scope(|mut scope| do catch {
+        current_logger().scope(|scope| do catch {
             write!(
                 buf,
                 "{}: {}: {}",

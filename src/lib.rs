@@ -196,7 +196,7 @@ pub mod future {
         
         **NOTE:** Enriched properties aren't visible on threads spawned within a scope unless a child scope is sent to them.
         */
-        pub fn scope<F>(mut self, f: F) -> ScopeFuture<F::Future>
+        pub fn scope<F>(self, f: F) -> ScopeFuture<F::Future>
         where
             F: IntoFuture,
         {
@@ -334,7 +334,7 @@ pub mod sync {
 impl Logger {
     fn scope<F, R>(&mut self, f: F) -> R
     where
-        F: FnOnce(Scope) -> R,
+        F: FnOnce(&mut Scope) -> R,
     {
         // Set the current shared log context
         // This makes the context available to other loggers on this thread
@@ -358,6 +358,7 @@ mod tests {
     extern crate test;
 
     use std::thread;
+    use std::panic;
 
     use self::test::Bencher;
     use futures::Future;
@@ -366,11 +367,8 @@ mod tests {
     use super::*;
     use log::Log;
 
-    impl<'a> Scope<'a> {
-        fn log<'b, 'c>(&'b mut self, record: Record<'c>) -> Log<'b, 'c>
-        where
-            'a: 'b,
-        {
+    impl Scope {
+        fn log<'b, 'c>(&'b mut self, record: Record<'c>) -> Log<'b, 'c> {
             Log::new(self.current(), record)
         }
 
@@ -470,6 +468,38 @@ mod tests {
                         }
                     }));
                 });
+            });
+    }
+
+    #[test]
+    fn enriched_panic() {
+        sync::logger()
+            .enrich("correlation", "An Id")
+            .enrich("service", "Banana")
+            .scope(|| {
+                panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                    sync::logger().enrich("service", "Mandarin").scope(|| {
+                        sync::logger().enrich("service", "Onion").scope(|| {
+                            assert_log(json!({
+                                "msg": "Hi user!",
+                                "ctxt": {
+                                    "correlation": "An Id",
+                                    "service": "Onion"
+                                }
+                            }));
+
+                            panic!("panic to catch_unwind");
+                        });
+                    });
+                }));
+
+                assert_log(json!({
+                    "msg": "Hi user!",
+                    "ctxt": {
+                        "correlation": "An Id",
+                        "service": "Banana"
+                    }
+                }));
             });
     }
 

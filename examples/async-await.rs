@@ -1,3 +1,7 @@
+/*!
+Try setting the `RUST_LOG` environment variable to `info` and run this example.
+*/
+
 #![feature(proc_macro, conservative_impl_trait, generators)]
 
 extern crate futures_await as futures;
@@ -22,7 +26,7 @@ fn main() {
     let f = logger().enrich("service", "basic.rs").scope(async_block! {
         info!("starting up");
 
-        await!({
+        let result = await!({
             logger()
                 .enrich("correlation", "Some Id")
                 .enrich("operation", "request")
@@ -33,25 +37,22 @@ fn main() {
                         logger().enrich("operation", "database").scope(async_block! {
                             info!("doing database stuff");
 
+                            // Sending a scope to another thread keeps the enriched properties
                             await!({
                                 pool.spawn(logger().scope(async_block! {
                                     info!("working on a background thread");
 
                                     ok()
                                 }))
-                            });
-
-                            ok()
+                            })
                         })
-                    });
-
-                    ok()
+                    })
                 })
         });
 
         info!("finishing up");
 
-        ok()
+        result
     });
 
     f.wait().unwrap();
