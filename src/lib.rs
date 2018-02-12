@@ -166,7 +166,12 @@ impl Logger {
         // Set the current shared log context
         // This makes the context available to other loggers on this thread
         // within the `scope` function
-        SharedCtxt::scope(self.ctxt.as_mut(), f)
+        if let Some(ref mut ctxt) = self.ctxt {
+            SharedCtxt::scope(ctxt, f)
+        }
+        else {
+            SharedCtxt::scope_current(f)
+        }
     }
 }
 
