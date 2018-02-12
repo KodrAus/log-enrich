@@ -64,7 +64,7 @@ impl<'a> ScopeCtxt<'a> {
             ScopeCtxt::Lazy(_) => {
                 let current = SHARED_CTXT.with(|shared| shared.borrow().current().cloned());
 
-                take_mut::take(self, |_| ScopeCtxt::Loaded(current));
+                *self = ScopeCtxt::Loaded(current);
 
                 self.get()
             }
