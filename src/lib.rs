@@ -70,10 +70,10 @@ impl Builder {
         // Each logger keeps a copy of the context it was created in so it can be shared
         // This context is set by other loggers calling `.scope()`
         let ctxt = if let Some(ctxt) = self.ctxt {
-            SharedCtxt::scope_current(|scope| {
+            SharedCtxt::scope_current(|mut scope| {
                 Some(Arc::new(Ctxt::from_scope(
                     ctxt.properties,
-                    &scope,
+                    &mut scope,
                 )))
             })
         } else {
@@ -186,15 +186,18 @@ mod tests {
     use super::*;
 
     impl<'a> Scope<'a> {
-        fn log<'b>(self, record: Record<'b>) -> Log<'a, 'b> {
-            Log::new(self, record)
+        fn log<'b, 'c>(&'b mut self, record: Record<'c>) -> Log<'b, 'c>
+        where
+            'a: 'b,
+        {
+            Log::new(self.current(), record)
         }
 
-        fn log_value<'b>(&self, record: Record<'b>) -> Value {
+        fn log_value<'b>(&mut self, record: Record<'b>) -> Value {
             serde_json::to_value(&self.log(record)).unwrap()
         }
 
-        fn log_string<'b>(&self, record: Record<'b>) -> String {
+        fn log_string<'b>(&mut self, record: Record<'b>) -> String {
             serde_json::to_string(&self.log(record)).unwrap()
         }
     }
@@ -208,13 +211,21 @@ mod tests {
         };
     }
 
+    fn log_value() -> Value {
+        logger().get().scope(|mut ctxt| ctxt.log_value(record!()))
+    }
+
+    fn log_string() -> String {
+        logger().get().scope(|mut ctxt| ctxt.log_string(record!()))
+    }
+
     #[test]
     fn basic() {
-        let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
+        let log = log_value();
 
         let expected = json!({
             "msg": "Hi user!",
-            "scope": Value::Null
+            "ctxt": Value::Null
         });
 
         assert_eq!(expected, log);
@@ -224,11 +235,11 @@ mod tests {
     fn enriched_empty() {
         let _: Result<_, ()> = logger()
             .scope_fn(|| {
-                let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
+                let log = log_value();
 
                 let expected = json!({
                     "msg": "Hi user!",
-                    "scope": Value::Null
+                    "ctxt": Value::Null
                 });
 
                 assert_eq!(expected, log);
@@ -244,11 +255,11 @@ mod tests {
             .enrich("correlation", "An Id")
             .enrich("service", "Banana")
             .scope_fn(|| {
-                let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
+                let log = log_value();
 
                 let expected = json!({
                     "msg": "Hi user!",
-                    "scope": {
+                    "ctxt": {
                         "correlation": "An Id",
                         "service": "Banana"
                     }
@@ -268,11 +279,11 @@ mod tests {
             .enrich("service", "Banana")
             .scope_fn(|| {
                 let log_1 = logger().enrich("service", "Mandarin").scope_fn(|| {
-                    let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
+                    let log = log_value();
 
                     let expected = json!({
                             "msg": "Hi user!",
-                            "scope": {
+                            "ctxt": {
                                 "correlation": "An Id",
                                 "service": "Mandarin"
                             }
@@ -284,11 +295,11 @@ mod tests {
                 });
 
                 let log_2 = logger().enrich("service", "Onion").scope_fn(|| {
-                    let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
+                    let log = log_value();
 
                     let expected = json!({
                             "msg": "Hi user!",
-                            "scope": {
+                            "ctxt": {
                                 "correlation": "An Id",
                                 "service": "Onion"
                             }
@@ -311,11 +322,11 @@ mod tests {
             .enrich("operation", "Logging")
             .enrich("service", "Banana")
             .scope(logger().enrich("correlation", "Another Id").scope_fn(|| {
-                let log = logger().get().scope(|ctxt| ctxt.log_value(record!()));
+                let log = log_value();
 
                 let expected = json!({
                             "msg": "Hi user!",
-                            "scope": {
+                            "ctxt": {
                                 "correlation": "Another Id",
                                 "context": "bg-thread",
                                 "operation": "Logging",
@@ -353,7 +364,7 @@ mod tests {
     #[bench]
     fn serialize_log_empty(b: &mut Bencher) {
         b.iter(|| {
-            logger().get().scope(|ctxt| ctxt.log_string(record!()));
+            log_string()
         });
     }
 
@@ -361,7 +372,7 @@ mod tests {
     fn serialize_log_1(b: &mut Bencher) {
         logger().enrich("correlation", "An Id").scope_sync(|| {
             b.iter(|| {
-                logger().get().scope(|ctxt| ctxt.log_string(record!()));
+                log_string()
             });
         });
     }

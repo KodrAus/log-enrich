@@ -4,11 +4,12 @@ use stdlog::Record;
 use env_logger::Formatter;
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
-use {logger, Scope};
+use ::logger;
+use ctxt::Ctxt;
 
 pub fn format() -> impl Fn(&mut Formatter, &Record) -> io::Result<()> {
     |buf, record| {
-        logger().get().scope(|scope| do catch {
+        logger().get().scope(|mut scope| do catch {
             write!(
                 buf,
                 "{}: {}: {}",
@@ -45,13 +46,14 @@ pub fn format() -> impl Fn(&mut Formatter, &Record) -> io::Result<()> {
 }
 
 pub struct Log<'a, 'b> {
-    scope: Scope<'a>,
+    ctxt: Option<&'a Ctxt>,
     record: Record<'b>,
 }
 
 impl<'a, 'b> Log<'a, 'b> {
-    pub(crate) fn new(scope: Scope<'a>, record: Record<'b>) -> Self {
-        Log { scope, record }
+    #[cfg(test)]
+    pub(crate) fn new(ctxt: Option<&'a Ctxt>, record: Record<'b>) -> Self {
+        Log { ctxt, record }
     }
 }
 
@@ -64,15 +66,15 @@ impl<'a, 'b> Serialize for Log<'a, 'b> {
         struct SerializeLog<'a, 'b> {
             #[serde(serialize_with = "serialize_msg")]
             msg: &'a Record<'a>,
-            #[serde(serialize_with = "serialize_scope")]
-            scope: Scope<'b>,
+            #[serde(serialize_with = "serialize_ctxt")]
+            ctxt: Option<&'b Ctxt>,
         }
 
-        fn serialize_scope<S>(scope: &Scope, serializer: S) -> Result<S::Ok, S::Error>
+        fn serialize_ctxt<S>(ctxt: &Option<&Ctxt>, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
         {
-            if let Some(ref ctxt) = scope.current() {
+            if let Some(ref ctxt) = *ctxt {
                 let properties = ctxt.properties();
 
                 let mut map = serializer.serialize_map(Some(properties.len()))?;
@@ -96,7 +98,7 @@ impl<'a, 'b> Serialize for Log<'a, 'b> {
 
         let log = SerializeLog {
             msg: &self.record,
-            scope: self.scope,
+            ctxt: self.ctxt.clone(),
         };
 
         log.serialize(serializer)

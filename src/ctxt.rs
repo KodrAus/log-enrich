@@ -49,14 +49,71 @@ impl Default for SharedCtxt {
     }
 }
 
-#[derive(Clone, Copy)]
+enum ScopeCtxt<'a> {
+    Lazy(&'a SharedGuard<'a>),
+    Loaded(Option<Arc<Ctxt>>),
+}
+
+impl<'a> ScopeCtxt<'a> {
+    fn new(guard: &'a SharedGuard<'a>) -> Self {
+        ScopeCtxt::Lazy(guard)
+    }
+
+    fn get(&mut self) -> Option<&Arc<Ctxt>> {
+        match *self {
+            ScopeCtxt::Lazy(_) => {
+                let current = SHARED_CTXT.with(|shared| {
+                    shared.borrow().current().cloned()
+                });
+
+                take_mut::take(self, |_| {
+                    ScopeCtxt::Loaded(current)
+                });
+                
+                self.get()
+            },
+            ScopeCtxt::Loaded(ref ctxt) => ctxt.as_ref()
+        }
+    }
+}
+
 pub(crate) struct Scope<'a> {
-    ctxt: Option<&'a Arc<Ctxt>>,
+    ctxt: ScopeCtxt<'a>,
+}
+
+struct SharedGuard<'a> {
+    shared: Option<&'a RefCell<SharedCtxt>>,
+    local: Option<&'a mut LocalCtxt>,
+}
+
+impl<'a> SharedGuard<'a> {
+    fn current(shared: &'a RefCell<SharedCtxt>) -> Self {
+        SharedGuard {
+            shared: Some(&shared),
+            local: None,
+        }
+    }
+
+    fn local(shared: &'a RefCell<SharedCtxt>, mut local: Option<&'a mut LocalCtxt>) -> Self {
+        SharedCtxt::push(&mut shared.borrow_mut(), &mut local);
+        SharedGuard {
+            shared: Some(&shared),
+            local: local,
+        }
+    }
+}
+
+impl<'a> Drop for SharedGuard<'a> {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.take() {
+            SharedCtxt::pop(&mut shared.borrow_mut(), self.local.take());
+        }
+    }
 }
 
 impl<'a> Scope<'a> {
-    pub(crate) fn current(&self) -> Option<&Ctxt> {
-        self.ctxt.as_ref().map(|ctxt| ctxt.as_ref())
+    pub(crate) fn current(&mut self) -> Option<&Ctxt> {
+        self.ctxt.get().map(|ctxt| ctxt.as_ref())
     }
 }
 
@@ -140,15 +197,8 @@ impl SharedCtxt {
         F: FnOnce(Scope) -> R
     {
         SHARED_CTXT.with(|shared| {
-            let current = {
-                shared
-                    .borrow()
-                    .current()
-                    .cloned()
-            };
-
             f(Scope {
-                ctxt: current.as_ref(),
+                ctxt: ScopeCtxt::new(&SharedGuard::current(&shared)),
             })
         })
     }
@@ -158,40 +208,10 @@ impl SharedCtxt {
         F: FnOnce(Scope) -> R
     {
         SHARED_CTXT.with(|shared| {
-            struct SharedGuard<'a> {
-                shared: Option<&'a RefCell<SharedCtxt>>,
-                local: Option<&'a mut LocalCtxt>,
-            }
-
-            impl<'a> SharedGuard<'a> {
-                fn new(shared: &'a RefCell<SharedCtxt>, mut local: Option<&'a mut LocalCtxt>) -> Self {
-                    SharedCtxt::push(&mut shared.borrow_mut(), &mut local);
-                    SharedGuard {
-                        shared: Some(&shared),
-                        local: local,
-                    }
-                }
-            }
-
-            impl<'a> Drop for SharedGuard<'a> {
-                fn drop(&mut self) {
-                    if let Some(shared) = self.shared.take() {
-                        SharedCtxt::pop(&mut shared.borrow_mut(), self.local.take());
-                    }
-                }
-            }
-
-            let guard = SharedGuard::new(&shared, local);
-
-            let current = {
-                shared
-                    .borrow()
-                    .current()
-                    .cloned()
-            };
+            let guard = SharedGuard::local(&shared, local);
 
             let ret = f(Scope {
-                ctxt: current.as_ref(),
+                ctxt: ScopeCtxt::new(&guard),
             });
 
             drop(guard);
@@ -301,8 +321,8 @@ impl Ctxt {
         }
     }
 
-    pub(crate) fn from_scope(properties: Properties, scope: &Scope) -> Self {
-        Ctxt::from_shared(properties, scope.ctxt.cloned())
+    pub(crate) fn from_scope(properties: Properties, scope: &mut Scope) -> Self {
+        Ctxt::from_shared(properties, scope.ctxt.get().cloned())
     }
 
     pub(crate) fn properties(&self) -> &Properties {
