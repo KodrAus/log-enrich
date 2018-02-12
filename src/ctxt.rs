@@ -153,10 +153,10 @@ impl LocalCtxt {
 impl LocalCtxtKind {
     fn clear_joined(&mut self) {
         take_mut::take(self, |ctxt| {
-            if let LocalCtxtKind::Joined { original, .. } = ctxt {
-                LocalCtxtKind::Local { local: original }
-            } else {
-                ctxt
+            match ctxt {
+                ctxt @ LocalCtxtKind::Local { .. } => ctxt,
+                LocalCtxtKind::Joined { original, .. } => LocalCtxtKind::Local { local: original },
+                LocalCtxtKind::__Uninitialized => panic!("attempted to use uninitialised context"),
             }
         })
     }
@@ -234,28 +234,28 @@ impl SharedCtxt {
         }
     }
 
-    fn push(shared: &mut SharedCtxt, logger: &mut Option<&mut LocalCtxt>) {
-        if let Some(ref mut incoming_ctxt) = *logger {
+    fn push(shared: &mut SharedCtxt, incoming: &mut Option<&mut LocalCtxt>) {
+        if let Some(ref mut incoming) = *incoming {
             // Check whether there's already an active context
             if let Some(shared_ctxt) = shared.current() {
                 // If we have a joined context, check it first
                 // If the shared context is invalid, then we might recreate it
-                if let LocalCtxtKind::Joined { ref joined, .. } = *incoming_ctxt.kind() {
+                if let LocalCtxtKind::Joined { ref joined, .. } = *incoming.kind() {
                     if let Some(ref parent) = joined.parent {
                         if Arc::ptr_eq(shared_ctxt, parent) {
-                            shared.swap_into_self(incoming_ctxt);
+                            shared.swap_into_self(incoming);
                             return;
                         }
                     }
 
-                    incoming_ctxt.clear_joined();
+                    incoming.clear_joined();
                 }
 
                 // Check the parent of the original context
-                if let LocalCtxtKind::Local { ref local, .. } = *incoming_ctxt.kind() {
+                if let LocalCtxtKind::Local { ref local, .. } = *incoming.kind() {
                     if let Some(ref parent) = local.parent {
                         if Arc::ptr_eq(shared_ctxt, parent) {
-                            shared.swap_into_self(incoming_ctxt);
+                            shared.swap_into_self(incoming);
                             return;
                         }
                     }
@@ -266,32 +266,36 @@ impl SharedCtxt {
                         local.properties.clone(),
                         Some(shared_ctxt.clone()),
                     ));
-                    incoming_ctxt.set_joined(joined);
+                    incoming.set_joined(joined);
 
-                    shared.swap_into_self(incoming_ctxt);
+                    shared.swap_into_self(incoming);
                     return;
+                }
+
+                if let LocalCtxtKind::__Uninitialized = *incoming.kind() {
+                    panic!("attempted to use uninitialised context");
                 }
 
                 unreachable!();
             } else {
                 // Make sure the joined context is `None`
                 // If this context is the root of this thread then there's no need for it
-                incoming_ctxt.clear_joined();
+                incoming.clear_joined();
 
                 let mut root_ctxt = SharedCtxt {
                     inner: LocalCtxtKind::__Uninitialized,
                 };
 
-                root_ctxt.swap_into_self(incoming_ctxt);
+                root_ctxt.swap_into_self(incoming);
 
                 *shared = root_ctxt;
             }
         }
     }
 
-    fn pop(shared: &mut SharedCtxt, mut logger: Option<&mut LocalCtxt>) {
-        if let Some(ref mut outgoing_ctxt) = logger {
-            shared.swap_out_of_self(outgoing_ctxt);
+    fn pop(shared: &mut SharedCtxt, mut outgoing: Option<&mut LocalCtxt>) {
+        if let Some(ref mut outgoing) = outgoing {
+            shared.swap_out_of_self(outgoing);
         }
     }
 }

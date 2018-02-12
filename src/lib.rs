@@ -8,7 +8,6 @@ It's compatible with `log`.
 #![feature(nll, catch_expr, conservative_impl_trait)]
 #![cfg_attr(test, feature(test))]
 
-extern crate backtrace;
 extern crate env_logger;
 extern crate futures;
 extern crate log as stdlog;
@@ -216,6 +215,13 @@ mod tests {
         logger().get().scope(|mut ctxt| ctxt.log_string(record!()))
     }
 
+    fn assert_log(expected: Value) {
+        for _ in 0..5 {
+            let log = log_value();
+            assert_eq!(expected, log);
+        }
+    }
+
     #[test]
     fn basic() {
         let log = log_value();
@@ -232,14 +238,10 @@ mod tests {
     fn enriched_empty() {
         let _: Result<_, ()> = logger()
             .scope_fn(|| {
-                let log = log_value();
-
-                let expected = json!({
+                assert_log(json!({
                     "msg": "Hi user!",
                     "ctxt": Value::Null
-                });
-
-                assert_eq!(expected, log);
+                }));
 
                 Ok(())
             })
@@ -252,17 +254,13 @@ mod tests {
             .enrich("correlation", "An Id")
             .enrich("service", "Banana")
             .scope_fn(|| {
-                let log = log_value();
-
-                let expected = json!({
+                assert_log(json!({
                     "msg": "Hi user!",
                     "ctxt": {
                         "correlation": "An Id",
                         "service": "Banana"
                     }
-                });
-
-                assert_eq!(expected, log);
+                }));
 
                 Ok(())
             })
@@ -276,33 +274,25 @@ mod tests {
             .enrich("service", "Banana")
             .scope_fn(|| {
                 let log_1 = logger().enrich("service", "Mandarin").scope_fn(|| {
-                    let log = log_value();
-
-                    let expected = json!({
-                            "msg": "Hi user!",
-                            "ctxt": {
-                                "correlation": "An Id",
-                                "service": "Mandarin"
-                            }
-                        });
-
-                    assert_eq!(expected, log);
+                    assert_log(json!({
+                        "msg": "Hi user!",
+                        "ctxt": {
+                            "correlation": "An Id",
+                            "service": "Mandarin"
+                        }
+                    }));
 
                     Ok(())
                 });
 
                 let log_2 = logger().enrich("service", "Onion").scope_fn(|| {
-                    let log = log_value();
-
-                    let expected = json!({
-                            "msg": "Hi user!",
-                            "ctxt": {
-                                "correlation": "An Id",
-                                "service": "Onion"
-                            }
-                        });
-
-                    assert_eq!(expected, log);
+                    assert_log(json!({
+                        "msg": "Hi user!",
+                        "ctxt": {
+                            "correlation": "An Id",
+                            "service": "Onion"
+                        }
+                    }));
 
                     Ok(())
                 });
@@ -319,19 +309,15 @@ mod tests {
             .enrich("operation", "Logging")
             .enrich("service", "Banana")
             .scope(logger().enrich("correlation", "Another Id").scope_fn(|| {
-                let log = log_value();
-
-                let expected = json!({
-                            "msg": "Hi user!",
-                            "ctxt": {
-                                "correlation": "Another Id",
-                                "context": "bg-thread",
-                                "operation": "Logging",
-                                "service": "Banana"
-                            }
-                        });
-
-                assert_eq!(expected, log);
+                assert_log(json!({
+                    "msg": "Hi user!",
+                    "ctxt": {
+                        "correlation": "Another Id",
+                        "context": "bg-thread",
+                        "operation": "Logging",
+                        "service": "Banana"
+                    }
+                }));
 
                 Ok(())
             }));
