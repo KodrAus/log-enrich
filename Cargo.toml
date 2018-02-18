@@ -2,6 +2,7 @@
 name = "log-enrich"
 version = "0.1.0"
 authors = ["Ashley Mannix <ashleymannix@live.com.au>"]
+license = "mit"
 
 [dependencies]
 futures = "*"
