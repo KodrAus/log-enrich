@@ -47,15 +47,9 @@ pub(crate) struct LocalCtxt {
 }
 
 #[derive(Debug)]
-enum LocalCtxtInner {
-    /**
-    The context is the one originally owned by the logger.
-    */
-    Owned(CtxtKind),
-    /**
-    The context has been temporarily swapped with a shared one.
-    */
-    Swapped(CtxtKind),
+struct LocalCtxtInner {
+    swapped: bool,
+    kind: CtxtKind
 }
 
 #[derive(Debug)]
@@ -152,57 +146,95 @@ impl Scope {
     }
 }
 
+impl CtxtKind {
+    fn is_empty(&self) -> bool {
+        match *self {
+            CtxtKind::Empty => true,
+            _ => false,
+        }
+    }
+
+    fn is_local(&self) -> bool {
+        match *self {
+            CtxtKind::Local { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn is_joined(&self) -> bool {
+        match *self {
+            CtxtKind::Joined { .. } => true,
+            _ => false,
+        }
+    }
+}
+
 impl LocalCtxt {
     pub(crate) fn new(ctxt: Arc<Ctxt>) -> Self {
         LocalCtxt {
-            inner: LocalCtxtInner::Owned(CtxtKind::Local { local: ctxt }),
+            inner: LocalCtxtInner {
+                kind: CtxtKind::Local { local: ctxt },
+                swapped: false,
+            },
         }
     }
 
     fn swap(&mut self, swap: &mut CtxtKind) {
-        take_mut::take(&mut self.inner, |local| match local {
-            LocalCtxtInner::Owned(mut kind) => {
-                mem::swap(swap, &mut kind);
-                LocalCtxtInner::Swapped(kind)
-            },
-            LocalCtxtInner::Swapped(mut kind) => {
-                mem::swap(swap, &mut kind);
-                LocalCtxtInner::Owned(kind)
-            },
-        })
+        // Use the inner kind directly, because it may not be valid
+        mem::swap(swap, self.raw_kind_mut());
+        self.inner.swapped = !self.inner.swapped;
     }
 
     fn clear_joined(&mut self) {
-        take_mut::take(self.kind_mut(), |ctxt| match ctxt {
-            ctxt @ CtxtKind::Local { .. } => ctxt,
-            CtxtKind::Joined { original, .. } => CtxtKind::Local { local: original },
-            CtxtKind::Empty => panic!("attempted to use empty context"),
-        })
+        let kind = self.local_kind_mut();
+
+        if kind.is_joined() {
+            take_mut::take(kind, |ctxt| match ctxt {
+                CtxtKind::Joined { original, .. } => CtxtKind::Local { local: original },
+                ctxt => ctxt,
+            })
+        }
     }
 
     fn set_joined(&mut self, joined: Arc<Ctxt>) {
-        take_mut::take(self.kind_mut(), |ctxt| match ctxt {
-            CtxtKind::Local { local } => CtxtKind::Joined {
-                original: local,
-                joined,
-            },
-            CtxtKind::Joined { original, .. } => CtxtKind::Joined { original, joined },
-            CtxtKind::Empty => panic!("attempted to use empty context"),
-        });
-    }
+        let kind = self.local_kind_mut();
 
-    fn kind(&self) -> &CtxtKind {
-        match self.inner {
-            LocalCtxtInner::Owned(ref kind) => kind,
-            LocalCtxtInner::Swapped(_) => panic!("attempted to use swapped context"),
+        if kind.is_local() {
+            take_mut::take(kind, |ctxt| match ctxt {
+                CtxtKind::Local { local } => CtxtKind::Joined {
+                    original: local,
+                    joined,
+                },
+                CtxtKind::Joined { original, .. } => CtxtKind::Joined { original, joined },
+                ctxt => ctxt,
+            });
         }
     }
 
-    fn kind_mut(&mut self) -> &mut CtxtKind {
-        match self.inner {
-            LocalCtxtInner::Owned(ref mut kind) => kind,
-            LocalCtxtInner::Swapped(_) => panic!("attempted to use swapped context"),
-        }
+    fn is_swapped(&self) -> bool {
+        self.inner.swapped
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.kind.is_empty()
+    }
+
+    fn local_kind(&self) -> &CtxtKind {
+        debug_assert!(!self.is_swapped(), "attempted to use swapped context");
+        debug_assert!(!self.is_empty(), "attempted to use empty context");
+
+        &self.inner.kind
+    }
+
+    fn local_kind_mut(&mut self) -> &mut CtxtKind {
+        debug_assert!(!self.is_swapped(), "attempted to use swapped context");
+        debug_assert!(!self.is_empty(), "attempted to use empty context");
+
+        &mut self.inner.kind
+    }
+
+    fn raw_kind_mut(&mut self) -> &mut CtxtKind {
+        &mut self.inner.kind
     }
 }
 
@@ -261,21 +293,15 @@ impl SharedCtxt {
     }
 
     fn swap_into_self(&mut self, local: &mut LocalCtxt) {
-        if let LocalCtxtInner::Owned(_) = local.inner {
-            local.swap(&mut self.inner);
-        }
-        else {
-            panic!("the local context has already been swapped");
-        }
+        debug_assert!(!local.is_swapped(), "the local context has already been swapped");
+        
+        local.swap(&mut self.inner);
     }
 
     fn swap_out_of_self(&mut self, local: &mut LocalCtxt) {
-        if let LocalCtxtInner::Swapped(_) = local.inner {
-            local.swap(&mut self.inner);
-        }
-        else {
-            panic!("the local context hasn't been swapped");
-        }
+        debug_assert!(local.is_swapped(), "the local context hasn't been swapped");
+        
+        local.swap(&mut self.inner);
     }
 
     fn push(shared: &mut SharedCtxt, incoming: &mut LocalCtxt) {
@@ -283,7 +309,7 @@ impl SharedCtxt {
         if let Some(shared_ctxt) = shared.current() {
             // If we have a joined context, check it first
             // If the shared context is invalid, then we might recreate it
-            if let CtxtKind::Joined { ref joined, .. } = *incoming.kind() {
+            if let CtxtKind::Joined { ref joined, .. } = *incoming.local_kind() {
                 if let Some(ref parent) = joined.parent {
                     if Arc::ptr_eq(shared_ctxt, parent) {
                         shared.swap_into_self(incoming);
@@ -295,7 +321,7 @@ impl SharedCtxt {
             }
 
             // Check the parent of the original context
-            if let CtxtKind::Local { ref local, .. } = *incoming.kind() {
+            if let CtxtKind::Local { ref local, .. } = *incoming.local_kind() {
                 if let Some(ref parent) = local.parent {
                     if Arc::ptr_eq(shared_ctxt, parent) {
                         shared.swap_into_self(incoming);
@@ -315,11 +341,7 @@ impl SharedCtxt {
                 return;
             }
 
-            if let CtxtKind::Empty = *incoming.kind() {
-                panic!("attempted to use uninitialised context");
-            }
-
-            unreachable!();
+            panic!("incoming context `{:?}` is invalid", incoming);
         } else {
             // Make sure the joined context is `None`
             // If this context is the root of this thread then there's no need for it

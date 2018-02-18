@@ -391,11 +391,11 @@ mod tests {
     }
 
     fn log_value() -> Value {
-        current_logger().scope(|mut ctxt| ctxt.log_value(record!()))
+        current_logger().scope(|ctxt| ctxt.log_value(record!()))
     }
 
     fn log_string() -> String {
-        current_logger().scope(|mut ctxt| ctxt.log_string(record!()))
+        current_logger().scope(|ctxt| ctxt.log_string(record!()))
     }
 
     fn assert_log(expected: Value) {
@@ -477,7 +477,7 @@ mod tests {
             .enrich("correlation", "An Id")
             .enrich("service", "Banana")
             .scope(|| {
-                panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                     sync::logger().enrich("service", "Mandarin").scope(|| {
                         sync::logger().enrich("service", "Onion").scope(|| {
                             assert_log(json!({
