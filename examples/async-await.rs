@@ -9,6 +9,7 @@ extern crate futures_cpupool as cpupool;
 #[macro_use]
 extern crate log;
 extern crate log_enrich;
+extern crate env_logger;
 
 use futures::prelude::*;
 use cpupool::CpuPool;
@@ -19,7 +20,9 @@ fn ok() -> Result<(), ()> {
 }
 
 fn main() {
-    log_enrich::init();
+    let stdlog = env_logger::Builder::from_env("MY_LOG").build();
+    let max_level = stdlog.filter();
+    log_enrich::init(stdlog, max_level);
 
     let pool = CpuPool::new(1);
 

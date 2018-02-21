@@ -1,5 +1,5 @@
 use std::mem;
-use std::collections::hash_map::{self, HashMap};
+use std::slice;
 
 use serde_json::Value;
 
@@ -12,13 +12,13 @@ This map is optimised for contexts that are empty or contain a single property.
 pub(crate) enum Properties {
     Empty,
     Single(&'static str, Value),
-    Map(HashMap<&'static str, Value>),
+    Map(Vec<(&'static str, Value)>),
 }
 
 pub(crate) enum PropertiesIter<'a> {
     Empty,
     Single(&'static str, &'a Value),
-    Map(hash_map::Iter<'a, &'static str, Value>),
+    Map(slice::Iter<'a, (&'static str, Value)>),
 }
 
 impl<'a> Iterator for PropertiesIter<'a> {
@@ -32,7 +32,7 @@ impl<'a> Iterator for PropertiesIter<'a> {
 
                 Some((k, v))
             }
-            PropertiesIter::Map(ref mut map) => map.next().map(|(k, v)| (*k, v)),
+            PropertiesIter::Map(ref mut map) => map.next().map(|&(k, ref v)| (k, v)),
         }
     }
 }
@@ -45,22 +45,35 @@ impl Default for Properties {
 
 impl Properties {
     pub fn insert(&mut self, k: &'static str, v: Value) {
+        self.insert_internal(k, v, true)
+    }
+
+    fn insert_internal(&mut self, k: &'static str, v: Value, dedup: bool) {
         match *self {
             Properties::Empty => {
                 *self = Properties::Single(k, v);
             }
             Properties::Single(_, _) => {
                 if let Properties::Single(pk, pv) =
-                    mem::replace(self, Properties::Map(HashMap::new()))
+                    mem::replace(self, Properties::Map(Vec::new()))
                 {
-                    self.insert(pk, pv);
-                    self.insert(k, v);
+                    self.insert_internal(pk, pv, false);
+                    self.insert_internal(k, v, dedup);
                 } else {
                     unreachable!()
                 }
             }
             Properties::Map(ref mut m) => {
-                m.insert(k, v);
+                if dedup {
+                    for &mut (ok, ref mut ov) in m.iter_mut() {
+                        if ok == k {
+                            *ov = v;
+                            return;
+                        }
+                    }
+                }
+
+                m.push((k, v));
             }
         }
     }
@@ -68,7 +81,7 @@ impl Properties {
     pub fn contains_key(&self, key: &'static str) -> bool {
         match *self {
             Properties::Single(k, _) if k == key => true,
-            Properties::Map(ref m) => m.contains_key(key),
+            Properties::Map(ref m) => m.iter().any(|&(k, _)| k == key),
             _ => false,
         }
     }
@@ -93,7 +106,7 @@ impl<'a> Extend<(&'static str, &'a Value)> for Properties {
     {
         for (k, v) in iter {
             if !self.contains_key(k) {
-                self.insert(k, v.to_owned());
+                self.insert_internal(k, v.to_owned(), false);
             }
         }
     }

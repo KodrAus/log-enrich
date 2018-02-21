@@ -21,6 +21,7 @@ extern crate serde_derive;
 extern crate serde_json;
 extern crate take_mut;
 
+mod log;
 mod ctxt;
 mod properties;
 
