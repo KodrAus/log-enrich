@@ -9,10 +9,11 @@ futures = "*"
 serde = "*"
 serde_derive = "*"
 serde_json = "*"
-log = "*"
-env_logger = "*"
+erased-serde = "*"
+log = { version = "*", path = "../log" }
 take_mut = "*"
 
 [dev-dependencies]
 futures-await = "*"
 futures-cpupool = "*"
+env_logger = { version = "*", path = "../env_logger" }

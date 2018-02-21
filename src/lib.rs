@@ -11,9 +11,9 @@ It's compatible with `log`.
 #![feature(nll, catch_expr, conservative_impl_trait)]
 #![cfg_attr(test, feature(test))]
 
-extern crate env_logger;
 extern crate futures;
 extern crate log as stdlog;
+extern crate erased_serde;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
@@ -22,7 +22,6 @@ extern crate serde_json;
 extern crate take_mut;
 
 mod ctxt;
-mod log;
 mod properties;
 
 use std::sync::Arc;
@@ -32,13 +31,44 @@ use self::properties::Properties;
 
 pub use serde_json::Value;
 
+pub struct Enriched<L> {
+    inner: L,
+}
+
+impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
+    fn log(&self, record: &stdlog::Record) {
+        current_logger().scope(|scope| {
+            if let Some(ctxt) = scope.current() {
+                // TODO: This allocation is unfortunate
+                let props = ctxt
+                    .properties()
+                    .iter()
+                    .map(|(k, v)| (k, v as &erased_serde::Serialize))
+                    .collect::<Vec<_>>();
+
+                self.inner.log(&record.push(&props));
+            }
+            else {
+                self.inner.log(record);
+            }
+        })
+    }
+
+    fn enabled(&self, metadata: &stdlog::Metadata) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn flush(&self) {
+        self.inner.flush()
+    }
+}
+
 /**
 Initialize a console logger that can read enriched properties.
 */
-pub fn init() {
-    env_logger::Builder::from_env(env_logger::Env::default())
-        .format(log::format())
-        .init();
+pub fn init<L>(inner: L, max_level: stdlog::LevelFilter) where L: stdlog::Log + 'static {
+    stdlog::set_max_level(max_level);
+    stdlog::set_boxed_logger(Box::new(Enriched { inner })).expect("failed to set logger");
 }
 
 fn current_logger() -> Logger {

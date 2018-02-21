@@ -5,11 +5,14 @@ Try setting the `RUST_LOG` environment variable to `info` and run this example.
 #[macro_use]
 extern crate log;
 extern crate log_enrich;
+extern crate env_logger;
 
 use log_enrich::sync::logger;
 
 fn main() {
-    log_enrich::init();
+    let stdlog = env_logger::Builder::from_env("MY_LOG").build();
+    let max_level = stdlog.filter();
+    log_enrich::init(stdlog, max_level);
 
     logger().enrich("service", "basic.rs").scope(|| {
         info!("starting up");
