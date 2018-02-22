@@ -1,9 +1,6 @@
-use std::io::{self, Write};
-
 use stdlog::Record;
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
-use current_logger;
 use ctxt::Ctxt;
 
 #[allow(unused)]

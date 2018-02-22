@@ -40,14 +40,7 @@ impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
     fn log(&self, record: &stdlog::Record) {
         current_logger().scope(|scope| {
             if let Some(ctxt) = scope.current() {
-                // TODO: This allocation is unfortunate
-                let props = ctxt
-                    .properties()
-                    .iter()
-                    .map(|(k, v)| (k, v as &erased_serde::Serialize))
-                    .collect::<Vec<_>>();
-
-                self.inner.log(&record.push(&props));
+                self.inner.log(&record.push(ctxt.properties()));
             }
             else {
                 self.inner.log(record);

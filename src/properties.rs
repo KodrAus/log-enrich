@@ -1,5 +1,6 @@
 use std::mem;
-use std::slice;
+use std::collections::btree_map::{self, BTreeMap};
+use stdlog::{Key, KeyValueSet, Serialize};
 
 use serde_json::Value;
 
@@ -12,13 +13,36 @@ This map is optimised for contexts that are empty or contain a single property.
 pub(crate) enum Properties {
     Empty,
     Single(&'static str, Value),
-    Map(Vec<(&'static str, Value)>),
+    Map(BTreeMap<&'static str, Value>),
+}
+
+impl KeyValueSet for Properties {
+    fn start(&self) -> Option<Key> {
+        match *self {
+            Properties::Empty => None,
+            Properties::Single(k, _) => Some(Key::String(k)),
+            Properties::Map(ref map) => map.start()
+        }
+    }
+
+    fn next(&self, key: &Key) -> Option<((&str, &Serialize), Option<Key>)> {
+        match *self {
+            Properties::Single(ref k, ref v) => {
+                match *key {
+                    Key::String(s) if s == *k => Some(((k, v), None)),
+                    _ => None,
+                }
+            },
+            Properties::Map(ref map) => map.next(key),
+            _ => None
+        }
+    }
 }
 
 pub(crate) enum PropertiesIter<'a> {
     Empty,
     Single(&'static str, &'a Value),
-    Map(slice::Iter<'a, (&'static str, Value)>),
+    Map(btree_map::Iter<'a, &'static str, Value>),
 }
 
 impl<'a> Iterator for PropertiesIter<'a> {
@@ -32,7 +56,7 @@ impl<'a> Iterator for PropertiesIter<'a> {
 
                 Some((k, v))
             }
-            PropertiesIter::Map(ref mut map) => map.next().map(|&(k, ref v)| (k, v)),
+            PropertiesIter::Map(ref mut map) => map.next().map(|(k, v)| (*k, v)),
         }
     }
 }
@@ -45,35 +69,22 @@ impl Default for Properties {
 
 impl Properties {
     pub fn insert(&mut self, k: &'static str, v: Value) {
-        self.insert_internal(k, v, true)
-    }
-
-    fn insert_internal(&mut self, k: &'static str, v: Value, dedup: bool) {
         match *self {
             Properties::Empty => {
                 *self = Properties::Single(k, v);
             }
             Properties::Single(_, _) => {
                 if let Properties::Single(pk, pv) =
-                    mem::replace(self, Properties::Map(Vec::new()))
+                    mem::replace(self, Properties::Map(BTreeMap::new()))
                 {
-                    self.insert_internal(pk, pv, false);
-                    self.insert_internal(k, v, dedup);
+                    self.insert(pk, pv);
+                    self.insert(k, v);
                 } else {
                     unreachable!()
                 }
             }
             Properties::Map(ref mut m) => {
-                if dedup {
-                    for &mut (ok, ref mut ov) in m.iter_mut() {
-                        if ok == k {
-                            *ov = v;
-                            return;
-                        }
-                    }
-                }
-
-                m.push((k, v));
+                m.insert(k, v);
             }
         }
     }
@@ -81,7 +92,7 @@ impl Properties {
     pub fn contains_key(&self, key: &'static str) -> bool {
         match *self {
             Properties::Single(k, _) if k == key => true,
-            Properties::Map(ref m) => m.iter().any(|&(k, _)| k == key),
+            Properties::Map(ref m) => m.contains_key(key),
             _ => false,
         }
     }
@@ -106,7 +117,7 @@ impl<'a> Extend<(&'static str, &'a Value)> for Properties {
     {
         for (k, v) in iter {
             if !self.contains_key(k) {
-                self.insert_internal(k, v.to_owned(), false);
+                self.insert(k, v.to_owned());
             }
         }
     }
