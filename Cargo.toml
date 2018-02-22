@@ -9,7 +9,6 @@ futures = "*"
 serde = "*"
 serde_derive = "*"
 serde_json = "*"
-erased-serde = "*"
 log = { version = "*", path = "../log" }
 take_mut = "*"
 

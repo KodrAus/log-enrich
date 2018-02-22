@@ -13,7 +13,6 @@ It's compatible with `log`.
 
 extern crate futures;
 extern crate log as stdlog;
-extern crate erased_serde;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
