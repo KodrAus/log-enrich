@@ -1,6 +1,6 @@
 use std::mem;
 use std::collections::btree_map::{self, BTreeMap};
-use stdlog::properties::{Key, Entry, KeyValues, Serialize};
+use stdlog::properties::{Key, Entry, KeyValues};
 
 use serde_json::Value;
 
