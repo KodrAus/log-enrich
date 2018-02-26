@@ -10,6 +10,8 @@ extern crate futures_cpupool as cpupool;
 extern crate log;
 extern crate log_enrich;
 extern crate env_logger;
+#[macro_use]
+extern crate serde_json;
 
 use futures::prelude::*;
 use cpupool::CpuPool;
@@ -33,6 +35,7 @@ fn main() {
             logger()
                 .enrich("correlation", "Some Id")
                 .enrich("operation", "request")
+                .enrich("data", json!({ "id": 1, "username": "Timmy" }))
                 .scope(async_block! {
                     info!("handling a request for {}", "Timmy");
 
