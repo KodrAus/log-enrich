@@ -28,10 +28,14 @@ impl KeyValues for Properties {
     fn entry(&self, key: &Key) -> Option<Entry> {
         match *self {
             Properties::Single(ref k, ref v) => {
-                match *key {
-                    Key::String(s) if s == *k => Some(Entry::new(k, v, None)),
-                    _ => None,
-                }
+                key.as_str().and_then(|s| {
+                    if s == *k {
+                        Some(Entry::new(k, v, None))
+                    }
+                    else {
+                        None
+                    }
+                })
             },
             Properties::Map(ref map) => map.entry(key),
             _ => None
