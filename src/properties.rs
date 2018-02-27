@@ -1,6 +1,6 @@
 use std::mem;
 use std::collections::btree_map::{self, BTreeMap};
-use stdlog::properties::{Key, Entry, KeyValues};
+use stdlog::properties::kv::{Key, Entry, KeyValues};
 
 use serde_json::Value;
 
@@ -43,24 +43,24 @@ impl KeyValues for Properties {
     }
 }
 
-pub(crate) enum PropertiesIter<'a> {
+pub(crate) enum Iter<'a> {
     Empty,
     Single(&'static str, &'a Value),
     Map(btree_map::Iter<'a, &'static str, Value>),
 }
 
-impl<'a> Iterator for PropertiesIter<'a> {
+impl<'a> Iterator for Iter<'a> {
     type Item = (&'static str, &'a Value);
 
     fn next(&mut self) -> Option<Self::Item> {
         match *self {
-            PropertiesIter::Empty => None,
-            PropertiesIter::Single(k, v) => {
-                *self = PropertiesIter::Empty;
+            Iter::Empty => None,
+            Iter::Single(k, v) => {
+                *self = Iter::Empty;
 
                 Some((k, v))
             }
-            PropertiesIter::Map(ref mut map) => map.next().map(|(k, v)| (*k, v)),
+            Iter::Map(ref mut map) => map.next().map(|(k, v)| (*k, v)),
         }
     }
 }
@@ -101,7 +101,7 @@ impl Properties {
         }
     }
 
-    pub fn iter(&self) -> PropertiesIter {
+    pub fn iter(&self) -> Iter {
         self.into_iter()
     }
 
@@ -128,14 +128,14 @@ impl<'a> Extend<(&'static str, &'a Value)> for Properties {
 }
 
 impl<'a> IntoIterator for &'a Properties {
-    type IntoIter = PropertiesIter<'a>;
+    type IntoIter = Iter<'a>;
     type Item = (&'static str, &'a Value);
 
     fn into_iter(self) -> Self::IntoIter {
         match *self {
-            Properties::Empty => PropertiesIter::Empty,
-            Properties::Single(ref k, ref v) => PropertiesIter::Single(k, v),
-            Properties::Map(ref m) => PropertiesIter::Map(m.iter()),
+            Properties::Empty => Iter::Empty,
+            Properties::Single(ref k, ref v) => Iter::Single(k, v),
+            Properties::Map(ref m) => Iter::Map(m.iter()),
         }
     }
 }
