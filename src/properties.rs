@@ -1,6 +1,6 @@
 use std::mem;
 use std::collections::btree_map::{self, BTreeMap};
-use stdlog::properties::kv::{Key, Entry, KeyValues};
+use stdlog::properties::{KeyValues, Serializer};
 
 use serde_json::Value;
 
@@ -17,28 +17,11 @@ pub(crate) enum Properties {
 }
 
 impl KeyValues for Properties {
-    fn first(&self) -> Option<Entry> {
+    fn serialize(&self, serializer: &mut Serializer) {
         match *self {
-            Properties::Empty => None,
-            Properties::Single(ref k, ref v) => Some(Entry::new(k, v, None)),
-            Properties::Map(ref map) => map.first()
-        }
-    }
-
-    fn entry(&self, key: &Key) -> Option<Entry> {
-        match *self {
-            Properties::Single(ref k, ref v) => {
-                key.as_str().and_then(|s| {
-                    if s == *k {
-                        Some(Entry::new(k, v, None))
-                    }
-                    else {
-                        None
-                    }
-                })
-            },
-            Properties::Map(ref map) => map.entry(key),
-            _ => None
+            Properties::Empty => (),
+            Properties::Single(ref key, ref value) => serializer.serialize_kv(&(key, value)),
+            Properties::Map(ref map) => map.serialize(serializer)
         }
     }
 }
