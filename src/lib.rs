@@ -39,7 +39,7 @@ impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
     fn log(&self, record: &stdlog::Record) {
         current_logger().scope(|scope| {
             if let Some(ctxt) = scope.current() {
-                self.inner.log(&record.push(ctxt.properties()));
+                self.inner.log(&record.push(&ctxt.properties()));
             }
             else {
                 self.inner.log(record);

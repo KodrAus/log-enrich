@@ -1,6 +1,5 @@
 use std::mem;
 use std::collections::btree_map::{self, BTreeMap};
-use stdlog::properties::{KeyValues, Serializer};
 
 use serde_json::Value;
 
@@ -14,16 +13,6 @@ pub(crate) enum Properties {
     Empty,
     Single(&'static str, Value),
     Map(BTreeMap<&'static str, Value>),
-}
-
-impl KeyValues for Properties {
-    fn serialize(&self, serializer: &mut Serializer) {
-        match *self {
-            Properties::Empty => (),
-            Properties::Single(ref key, ref value) => serializer.serialize_kv(&(key, value)),
-            Properties::Map(ref map) => map.serialize(serializer)
-        }
-    }
 }
 
 pub(crate) enum Iter<'a> {
