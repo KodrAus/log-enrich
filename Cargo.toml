@@ -5,7 +5,7 @@ authors = ["Ashley Mannix <ashleymannix@live.com.au>"]
 license = "mit"
 
 [dependencies]
-futures = "*"
+futures = "~0.1"
 serde = "*"
 serde_derive = "*"
 serde_json = "*"
@@ -13,6 +13,6 @@ log = { version = "*", path = "../log" }
 take_mut = "*"
 
 [dev-dependencies]
-futures-await = "*"
-futures-cpupool = "*"
+futures-await = "~0.1"
+futures-cpupool = "~0.1"
 env_logger = { version = "*", path = "../env_logger" }

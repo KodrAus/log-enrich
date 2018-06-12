@@ -8,7 +8,7 @@ It's compatible with `log`.
 - Call `future::logger()` to create a scope that works with `futures`.
 */
 
-#![feature(nll, catch_expr, conservative_impl_trait)]
+#![feature(nll, catch_expr)]
 #![cfg_attr(test, feature(test))]
 
 extern crate futures;
@@ -36,6 +36,10 @@ pub struct Enriched<L> {
 }
 
 impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
+    fn enabled(&self, metadata: &stdlog::Metadata) -> bool {
+        self.inner.enabled(metadata)
+    }
+
     fn log(&self, record: &stdlog::Record) {
         current_logger().scope(|scope| {
             if let Some(ctxt) = scope.current() {
@@ -45,10 +49,6 @@ impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
                 self.inner.log(record);
             }
         })
-    }
-
-    fn enabled(&self, metadata: &stdlog::Metadata) -> bool {
-        self.inner.enabled(metadata)
     }
 
     fn flush(&self) {

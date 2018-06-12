@@ -1,8 +1,8 @@
 /*!
-Try setting the `RUST_LOG` environment variable to `info` and run this example.
+Try setting the `MY_LOG` environment variable to `info` and run this example.
 */
 
-#![feature(proc_macro, conservative_impl_trait, generators)]
+#![feature(proc_macro, proc_macro_non_items, generators)]
 
 extern crate futures_await as futures;
 extern crate futures_cpupool as cpupool;
