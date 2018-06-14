@@ -2,7 +2,7 @@ use std::mem;
 use std::collections::btree_map::{self, BTreeMap};
 
 use serde_json::Value;
-use stdlog::properties::{KeyValues, Serializer};
+use stdlog::key_values::{KeyValues, Visitor};
 
 /**
 A map of enriched properties.
@@ -114,9 +114,9 @@ impl<'a> IntoIterator for &'a Properties {
 }
 
 impl KeyValues for Properties {
-    fn serialize(&self, serializer: &mut dyn Serializer) {
+    fn visit(&self, visitor: &mut dyn Visitor) {
         for kv in self {
-            serializer.serialize_kv(&kv);
+            visitor.visit_kv(&kv);
         }
     }
 }
