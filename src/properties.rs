@@ -120,3 +120,30 @@ impl KeyValues for Properties {
         }
     }
 }
+
+/// A chain of key value pairs.
+#[derive(Clone)]
+pub(crate) struct Chained<'a> {
+    kvs: &'a dyn KeyValues,
+    parent: Option<&'a dyn KeyValues>,
+}
+
+impl<'a> Chained<'a> {
+    /// Create a new set of properties with a parent and additional key value pairs.
+    pub fn chained(parent: &'a dyn KeyValues, kvs: &'a dyn KeyValues) -> Self {
+        Chained {
+            kvs,
+            parent: Some(parent)
+        }
+    }
+}
+
+impl<'a> KeyValues for Chained<'a> {
+    fn visit(&self, visitor: &mut dyn Visitor) {
+        self.kvs.visit(visitor);
+
+        if let Some(parent) = self.parent {
+            parent.visit(visitor);
+        }
+    }
+}

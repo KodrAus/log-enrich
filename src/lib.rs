@@ -27,7 +27,7 @@ mod properties;
 use std::sync::Arc;
 
 use self::ctxt::{Ctxt, LocalCtxt, Scope, SharedCtxt};
-use self::properties::Properties;
+use self::properties::{Chained, Properties};
 
 pub use serde_json::Value;
 
@@ -43,7 +43,10 @@ impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
     fn log(&self, record: &stdlog::Record) {
         current_logger().scope(|scope| {
             if let Some(ctxt) = scope.current() {
-                self.inner.log(&record.push_key_values(ctxt.properties()));
+                let chained = Chained::chained(record.key_values(), ctxt.properties());
+                let record = record.with_key_values(&chained);
+
+                self.inner.log(&record);
             }
             else {
                 self.inner.log(record);
