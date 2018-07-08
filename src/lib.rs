@@ -44,7 +44,11 @@ impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
         current_logger().scope(|scope| {
             if let Some(ctxt) = scope.current() {
                 let chained = Chained::chained(record.key_values(), ctxt.properties());
-                let record = record.with_key_values(&chained);
+
+                let record = record
+                    .to_builder()
+                    .key_values(&chained)
+                    .build(); 
 
                 self.inner.log(&record);
             }
