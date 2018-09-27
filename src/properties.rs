@@ -2,7 +2,7 @@ use std::mem;
 use std::collections::btree_map::{self, BTreeMap};
 
 use serde_json::Value;
-use stdlog::key_values::{KeyValue, KeyValues, Visitor};
+use stdlog::key_values::{KeyValues, Visitor, ToKey, ToValue};
 
 /**
 A map of enriched properties.
@@ -114,9 +114,9 @@ impl<'a> IntoIterator for &'a Properties {
 }
 
 impl KeyValues for Properties {
-    fn visit(&self, visitor: &mut dyn Visitor) {
-        for kv in self {
-            kv.visit(visitor);
+    fn visit<'kvs, 'vis>(&'kvs self, visitor: &'vis mut dyn Visitor<'kvs>) {
+        for (k, v) in self {
+            visitor.visit_pair(k.to_key(), v.to_value());
         }
     }
 }
@@ -139,7 +139,7 @@ impl<'a> Chained<'a> {
 }
 
 impl<'a> KeyValues for Chained<'a> {
-    fn visit(&self, visitor: &mut dyn Visitor) {
+    fn visit<'kvs, 'vis>(&'kvs self, visitor: &'vis mut dyn Visitor<'kvs>) {
         self.kvs.visit(visitor);
 
         if let Some(parent) = self.parent {

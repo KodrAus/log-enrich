@@ -8,7 +8,7 @@ It's compatible with `log`.
 - Call `future::logger()` to create a scope that works with `futures`.
 */
 
-#![feature(nll, catch_expr)]
+#![feature(nll)]
 #![cfg_attr(test, feature(test))]
 
 extern crate futures;
