@@ -2,7 +2,7 @@ use std::mem;
 use std::collections::btree_map::{self, BTreeMap};
 
 use serde_json::Value;
-use stdlog::key_values::{KeyValueSource, Visitor, ToKey, ToValue};
+use stdlog::key_values::{KeyValueSource, Visitor, ToKey, ToValue, Error};
 
 /**
 A map of enriched properties.
@@ -114,36 +114,14 @@ impl<'a> IntoIterator for &'a Properties {
 }
 
 impl KeyValueSource for Properties {
-    fn visit<'kvs, 'vis>(&'kvs self, visitor: &'vis mut dyn Visitor<'kvs>) {
+    fn visit<'kvs, V>(&'kvs self, mut visitor: V) -> Result<(), Error>
+    where
+        V: Visitor<'kvs>
+    {
         for (k, v) in self {
-            visitor.visit_pair(k.to_key(), v.to_value());
+            visitor.visit_pair(k.to_key(), v.to_value())?;
         }
-    }
-}
 
-/// A chain of key value pairs.
-#[derive(Clone)]
-pub(crate) struct Chained<'a> {
-    kvs: &'a dyn KeyValueSource,
-    parent: Option<&'a dyn KeyValueSource>,
-}
-
-impl<'a> Chained<'a> {
-    /// Create a new set of properties with a parent and additional key value pairs.
-    pub fn chained(parent: &'a dyn KeyValueSource, kvs: &'a dyn KeyValueSource) -> Self {
-        Chained {
-            kvs,
-            parent: Some(parent)
-        }
-    }
-}
-
-impl<'a> KeyValueSource for Chained<'a> {
-    fn visit<'kvs, 'vis>(&'kvs self, visitor: &'vis mut dyn Visitor<'kvs>) {
-        self.kvs.visit(visitor);
-
-        if let Some(parent) = self.parent {
-            parent.visit(visitor);
-        }
+        Ok(())
     }
 }
