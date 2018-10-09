@@ -114,10 +114,7 @@ impl<'a> IntoIterator for &'a Properties {
 }
 
 impl KeyValueSource for Properties {
-    fn visit<'kvs, V>(&'kvs self, mut visitor: V) -> Result<(), Error>
-    where
-        V: Visitor<'kvs>
-    {
+    fn visit<'kvs>(&'kvs self, visitor: &mut Visitor<'kvs>) -> Result<(), Error> {
         for (k, v) in self {
             visitor.visit_pair(k.to_key(), v.to_value())?;
         }

@@ -26,7 +26,6 @@ mod properties;
 
 use std::sync::Arc;
 
-use stdlog::key_values::KeyValueSource;
 use self::ctxt::{Ctxt, LocalCtxt, Scope, SharedCtxt};
 use self::properties::Properties;
 
