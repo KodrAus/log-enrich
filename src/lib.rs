@@ -52,8 +52,8 @@ impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
 
                 let record = record
                     .to_builder()
-                    .key_values(&kvs)
-                    .build(); 
+                    .key_values(kvs.erase())
+                    .build();
 
                 self.inner.log(&record);
             }
