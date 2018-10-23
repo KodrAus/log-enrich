@@ -41,14 +41,13 @@ impl<L> stdlog::Log for Enriched<L> where L: stdlog::Log {
     }
 
     fn log(&self, record: &stdlog::Record) {
-        use stdlog::key_values::KeyValueSource;
+        use stdlog::key_values::Source;
 
         current_logger().scope(|scope| {
             if let Some(ctxt) = scope.current() {
                 let kvs = record
                     .key_values()
-                    .chain(ctxt.properties())
-                    .sort_retain_last();
+                    .chain(ctxt.properties());
 
                 let record = record
                     .to_builder()

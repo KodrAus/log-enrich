@@ -2,7 +2,7 @@ use std::mem;
 use std::collections::btree_map::{self, BTreeMap};
 
 use serde_json::Value;
-use stdlog::key_values::{KeyValueSource, Visitor, ToKey, ToValue, Error};
+use stdlog::key_values::{Source, SourceVisitor, Error};
 
 /**
 A map of enriched properties.
@@ -113,10 +113,10 @@ impl<'a> IntoIterator for &'a Properties {
     }
 }
 
-impl KeyValueSource for Properties {
-    fn visit<'kvs>(&'kvs self, visitor: &mut Visitor<'kvs>) -> Result<(), Error> {
+impl Source for Properties {
+    fn visit<'kvs>(&'kvs self, visitor: &mut SourceVisitor<'kvs>) -> Result<(), Error> {
         for (k, v) in self {
-            visitor.visit_pair(k.to_key(), v.to_value())?;
+            visitor.visit_pair(k, &*v)?;
         }
 
         Ok(())

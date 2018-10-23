@@ -9,7 +9,7 @@ futures = "~0.1"
 serde = "*"
 serde_derive = "*"
 serde_json = "*"
-log = { version = "*", path = "../log" }
+log = { version = "*", path = "../log", features = ["structured_serde"] }
 take_mut = "*"
 
 [dev-dependencies]
