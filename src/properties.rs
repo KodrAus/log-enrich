@@ -116,7 +116,7 @@ impl<'a> IntoIterator for &'a Properties {
 impl Source for Properties {
     fn visit<'kvs>(&'kvs self, visitor: &mut dyn source::Visitor<'kvs>) -> Result<(), source::Error> {
         for (k, v) in self {
-            visitor.visit_pair(source::Key::new(k), source::Value::new(v))?;
+            visitor.visit_pair(source::Key::from_str(k, None), source::Value::from_serde(v))?;
         }
 
         Ok(())

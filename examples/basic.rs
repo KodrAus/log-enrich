@@ -10,7 +10,7 @@ extern crate env_logger;
 use log_enrich::sync::logger;
 
 fn main() {
-    let stdlog = env_logger::Builder::from_env("MY_LOG").build();
+    let stdlog = env_logger::Builder::from_env("MY_LOG").json_format().build();
     let max_level = stdlog.filter();
     log_enrich::init(stdlog, max_level);
 

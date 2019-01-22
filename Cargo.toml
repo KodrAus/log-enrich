@@ -9,10 +9,10 @@ futures = "~0.1"
 serde = "*"
 serde_derive = "*"
 serde_json = "*"
-log = { version = "*", path = "../log", features = ["structured_serde"] }
+log = { version = "*", path = "../log", features = ["kv_serde"] }
 take_mut = "*"
 
 [dev-dependencies]
 futures-await = "~0.1"
 futures-cpupool = "~0.1"
-env_logger = { version = "*", path = "../env_logger" }
+env_logger = { version = "*", features = ["json"], path = "../env_logger" }
