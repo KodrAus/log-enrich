@@ -1,3 +1,5 @@
+> This code has been moved to https://github.com/KodrAus/antlog
+
 # `log_enrich`
 
 This is a rough-and-ready experimental API for enriching logs with contextual properties without having to pass explicit loggers through your application. It works with the `log` crate, currently using a custom `env_logger` format. Property enrichment is a feature that works naturally with structured logging.
